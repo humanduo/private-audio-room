@@ -63,7 +63,7 @@ button:focus-visible {
   width: 100%;
   min-height: 100dvh;
   position: relative;
-  padding: 14px 14px 166px;
+  padding: 12px 12px 154px;
 }
 
 .topbar {
@@ -146,30 +146,30 @@ button:focus-visible {
 }
 
 .hero-card {
-  min-height: 214px;
-  border-radius: 26px;
-  padding: 20px;
+  min-height: 168px;
+  border-radius: 22px;
+  padding: 16px;
   display: grid;
-  grid-template-columns: 1fr 138px;
-  gap: 18px;
+  grid-template-columns: 1fr 126px;
+  gap: 14px;
   background:
     linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(255, 244, 240, 0.96)),
     var(--bg-warm);
-  box-shadow: 0 18px 48px rgba(88, 54, 45, 0.1);
+  box-shadow: 0 10px 28px rgba(88, 54, 45, 0.08);
   overflow: hidden;
   border: 1px solid rgba(255, 236, 230, 0.9);
 }
 
 .eyebrow {
-  margin: 0 0 8px;
+  margin: 0 0 7px;
   color: var(--accent);
   font-weight: 800;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .hero-card h1 {
   margin: 0;
-  font-size: 31px;
+  font-size: 27px;
   line-height: 1.12;
   letter-spacing: 0;
   font-family: "Songti SC", "Noto Serif SC", "STSong", serif;
@@ -177,10 +177,10 @@ button:focus-visible {
 }
 
 .hero-card p:not(.eyebrow) {
-  margin: 10px 0 18px;
+  margin: 8px 0 14px;
   color: var(--text-secondary);
   line-height: 1.5;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .hero-cover,
@@ -195,10 +195,10 @@ button:focus-visible {
 }
 
 .hero-cover {
-  width: 138px;
-  aspect-ratio: 1.08;
-  border-radius: 28px;
-  transform: rotate(3deg);
+  width: 126px;
+  aspect-ratio: 1;
+  border-radius: 20px;
+  transform: none;
   align-self: center;
 }
 
@@ -232,12 +232,12 @@ button:focus-visible {
 }
 
 .primary-action {
-  min-height: 42px;
+  min-height: 38px;
   display: inline-flex;
   align-items: center;
   gap: 8px;
   border-radius: 999px;
-  padding: 0 17px;
+  padding: 0 15px;
   background: var(--accent);
   color: white;
   font-weight: 800;
@@ -288,11 +288,11 @@ button:focus-visible {
   grid-template-columns: repeat(5, 1fr);
   gap: 4px;
   overflow-x: auto;
-  padding: 18px 10px 16px;
-  margin: 16px 0 20px;
-  border-radius: 24px;
+  padding: 14px 8px 12px;
+  margin: 14px 0 18px;
+  border-radius: 20px;
   background: var(--bg-elevated);
-  box-shadow: 0 12px 34px rgba(88, 54, 45, 0.07);
+  box-shadow: 0 8px 24px rgba(88, 54, 45, 0.06);
   border: 1px solid rgba(238, 232, 228, 0.8);
   scrollbar-width: none;
 }
@@ -344,6 +344,23 @@ button:focus-visible {
   cursor: pointer;
 }
 
+.cover-generate {
+  min-height: 36px;
+  margin-left: 8px;
+  border-radius: 999px;
+  padding: 0 13px;
+  background: #251f24;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 800;
+  vertical-align: middle;
+}
+
+.cover-generate:disabled {
+  opacity: 0.62;
+  cursor: wait;
+}
+
 .cover-upload input {
   position: absolute;
   width: 1px;
@@ -357,12 +374,12 @@ button:focus-visible {
   align-items: end;
   justify-content: space-between;
   gap: 12px;
-  margin: 20px 2px 12px;
+  margin: 18px 2px 10px;
 }
 
 .section-header h2 {
   margin: 0;
-  font-size: 24px;
+  font-size: 21px;
   font-family: "Songti SC", "Noto Serif SC", "STSong", serif;
   font-weight: 900;
 }
@@ -395,9 +412,9 @@ button:focus-visible {
 .category-chips button,
 .category-preview span {
   flex: 0 0 auto;
-  min-height: 38px;
+  min-height: 34px;
   border-radius: 999px;
-  padding: 0 14px;
+  padding: 0 13px;
   display: inline-flex;
   align-items: center;
   background: var(--bg-muted);
@@ -414,25 +431,28 @@ button:focus-visible {
 
 .drama-list {
   display: grid;
-  gap: 14px;
+  gap: 10px;
   padding-bottom: 6px;
 }
 
 .drama-row {
-  min-height: 118px;
+  min-height: 96px;
   display: grid;
-  grid-template-columns: 1fr 58px;
-  gap: 12px;
+  grid-template-columns: 1fr 50px;
+  gap: 10px;
   align-items: center;
-  padding: 12px 0;
-  border-bottom: 1px solid rgba(238, 232, 228, 0.9);
+  padding: 10px;
+  border-radius: 17px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(238, 232, 228, 0.78);
+  box-shadow: 0 7px 18px rgba(31, 31, 35, 0.045);
 }
 
 .drama-row-main {
   min-width: 0;
   display: grid;
-  grid-template-columns: 112px 1fr;
-  gap: 14px;
+  grid-template-columns: 104px 1fr;
+  gap: 12px;
   align-items: center;
   background: transparent;
   color: var(--text-primary);
@@ -440,12 +460,12 @@ button:focus-visible {
 }
 
 .drama-row-cover {
-  width: 112px;
+  width: 104px;
   aspect-ratio: 1.42;
-  border-radius: 14px;
+  border-radius: 13px;
   background-size: cover !important;
   background-position: center !important;
-  box-shadow: 0 10px 26px rgba(40, 30, 35, 0.1);
+  box-shadow: 0 8px 20px rgba(40, 30, 35, 0.08);
 }
 
 .drama-row-copy {
@@ -459,20 +479,20 @@ button:focus-visible {
 }
 
 .drama-row-copy strong {
-  font-size: 19px;
+  font-size: 18px;
   line-height: 1.2;
   font-family: "Songti SC", "Noto Serif SC", "STSong", serif;
   font-weight: 900;
 }
 
 .drama-row-copy small {
-  margin-top: 8px;
+  margin-top: 6px;
   color: var(--text-secondary);
   font-size: 13px;
 }
 
 .drama-row-copy em {
-  margin-top: 7px;
+  margin-top: 5px;
   color: var(--text-tertiary);
   font-size: 12px;
   font-style: normal;
@@ -488,7 +508,7 @@ button:focus-visible {
 .drama-row-progress {
   display: block;
   height: 3px;
-  margin-top: 10px;
+  margin-top: 8px;
   border-radius: 999px;
   background: rgba(255, 99, 112, 0.12);
   overflow: hidden;
@@ -502,14 +522,14 @@ button:focus-visible {
 }
 
 .drama-play {
-  width: 50px;
-  height: 50px;
+  width: 46px;
+  height: 46px;
   border-radius: 50%;
   display: grid;
   place-items: center;
   background: var(--accent);
   color: white;
-  box-shadow: 0 12px 28px rgba(255, 99, 112, 0.26);
+  box-shadow: 0 10px 22px rgba(255, 99, 112, 0.22);
 }
 
 .waterfall-grid {
@@ -597,7 +617,7 @@ button:focus-visible {
 }
 
 .soft-list button,
-.result-list button,
+.result-main,
 .episode-list button {
   width: 100%;
   min-height: 58px;
@@ -609,6 +629,34 @@ button:focus-visible {
   background: var(--bg-elevated);
   color: var(--text-primary);
   text-align: left;
+}
+
+.result-row {
+  min-height: 58px;
+  border-radius: 18px;
+  display: grid;
+  grid-template-columns: 1fr 40px;
+  gap: 8px;
+  align-items: center;
+  background: var(--bg-elevated);
+  padding: 8px 10px;
+}
+
+.result-main {
+  min-height: 42px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.inline-play {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--accent);
+  color: white;
 }
 
 .soft-list span {
@@ -981,19 +1029,19 @@ button:focus-visible {
 .mini-player {
   position: fixed;
   z-index: 20;
-  left: 14px;
-  right: 14px;
-  bottom: 78px;
-  min-height: 68px;
-  border-radius: 24px;
+  left: 12px;
+  right: 12px;
+  bottom: 82px;
+  min-height: 62px;
+  border-radius: 22px;
   padding: 10px 12px;
   display: grid;
-  grid-template-columns: 48px 1fr 42px;
+  grid-template-columns: 44px 1fr 40px;
   align-items: center;
   gap: 12px;
   background: rgba(255, 255, 255, 0.86);
   backdrop-filter: blur(18px);
-  box-shadow: var(--shadow);
+  box-shadow: 0 12px 34px rgba(31, 31, 35, 0.1);
   border: 1px solid rgba(255, 255, 255, 0.72);
 }
 
@@ -1012,8 +1060,8 @@ button:focus-visible {
 }
 
 .mini-player button {
-  width: 42px;
-  height: 42px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
   display: grid;
   place-items: center;
@@ -1027,9 +1075,9 @@ button:focus-visible {
   left: 0;
   right: 0;
   bottom: 0;
-  height: 70px;
+  height: 74px;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   padding: 6px 10px 8px;
   background: rgba(255, 255, 255, 0.94);
   backdrop-filter: blur(18px);
@@ -1044,6 +1092,24 @@ button:focus-visible {
   color: var(--text-tertiary);
   font-size: 11px;
   font-weight: 800;
+}
+
+.bottom-nav .nav-player {
+  width: 60px;
+  height: 60px;
+  place-self: start center;
+  margin-top: -24px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.96) 0 35%, transparent 36%),
+    var(--accent);
+  color: white;
+  box-shadow: 0 12px 28px rgba(255, 99, 112, 0.28);
+  border: 5px solid rgba(255, 255, 255, 0.96);
+}
+
+.bottom-nav .nav-player.playing {
+  transform: translateY(-1px);
 }
 
 .bottom-nav button.active {
@@ -1169,18 +1235,18 @@ button:focus-visible {
 
 @media (max-width: 430px) {
   .hero-card {
-    grid-template-columns: 1fr 118px;
+    grid-template-columns: 1fr 112px;
     gap: 10px;
-    padding: 18px;
+    padding: 15px;
   }
 
   .hero-cover {
-    width: 118px;
-    border-radius: 24px;
+    width: 112px;
+    border-radius: 18px;
   }
 
   .hero-card h1 {
-    font-size: 28px;
+    font-size: 25px;
   }
 
   .primary-action {

@@ -7,9 +7,9 @@ import {
   Search,
   Sparkles
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
-import { createCategory, fetchAlbums, fetchCategories, fetchNas, saveNas, scanNas, updateAlbumCover } from './api';
-import type { Album, AppView, Category, MediaKind, NasConfig } from './types';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { createCategory, fetchAlbums, fetchCategories, fetchNas, generateAlbumCover, saveNas, scanNas, updateAlbumCover } from './api';
+import type { Album, AppView, Category, Episode, MediaKind, NasConfig } from './types';
 
 const tabs: Array<{ kind: MediaKind; label: string }> = [
   { kind: 'drama', label: '广播剧' },
@@ -58,6 +58,10 @@ export function App() {
   const [nasRoot, setNasRoot] = useState('');
   const [notice, setNotice] = useState('');
   const [isLoading, setIsLoading] = useState(true);
+  const [playerAlbum, setPlayerAlbum] = useState<Album | null>(null);
+  const [playerEpisode, setPlayerEpisode] = useState<Episode | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   async function load(kind = activeKind, q = query, category = activeCategory) {
     setIsLoading(true);
@@ -84,6 +88,54 @@ export function App() {
 
   const continueAlbum = useMemo(() => albums.find((album) => album.status === 'listening') || albums[0], [albums]);
   const currentEpisode = continueAlbum?.episodes.find((episode) => (episode.progress || 0) < 100) || continueAlbum?.episodes[0];
+  const displayedPlayerAlbum = playerAlbum || continueAlbum;
+  const displayedPlayerEpisode = playerEpisode || currentEpisode;
+
+  function nextPlayableEpisode(album: Album) {
+    return album.episodes.find((episode) => episode.filePath && (episode.progress || 0) < 100) || album.episodes.find((episode) => episode.filePath) || album.episodes[0];
+  }
+
+  async function playAlbum(album: Album, episode = nextPlayableEpisode(album)) {
+    if (!episode?.filePath) {
+      setNotice('这个条目还没有真实音频文件，请先在 NAS 文件页扫描音频');
+      setPlayerAlbum(album);
+      setPlayerEpisode(episode || null);
+      setIsPlaying(false);
+      return;
+    }
+
+    setPlayerAlbum(album);
+    setPlayerEpisode(episode);
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    const src = `/media/${encodeURIComponent(album.id)}/${encodeURIComponent(episode.id)}`;
+    if (!audio.src.endsWith(src)) audio.src = src;
+    try {
+      await audio.play();
+      setIsPlaying(true);
+    } catch {
+      setNotice('浏览器拦截了自动播放，请再点一次播放按钮');
+      setIsPlaying(false);
+    }
+  }
+
+  function togglePlay() {
+    const audio = audioRef.current;
+    if (!displayedPlayerAlbum || !displayedPlayerEpisode || !audio) return;
+    if (!displayedPlayerEpisode.filePath) {
+      void playAlbum(displayedPlayerAlbum, displayedPlayerEpisode);
+      return;
+    }
+
+    if (isPlaying) {
+      audio.pause();
+      setIsPlaying(false);
+      return;
+    }
+
+    void playAlbum(displayedPlayerAlbum, displayedPlayerEpisode);
+  }
 
   async function handleScan() {
     try {
@@ -126,6 +178,18 @@ export function App() {
     setAlbums((current) => current.map((album) => (album.id === albumId ? updatedAlbum : album)));
     setSelectedAlbum((current) => (current?.id === albumId ? updatedAlbum : current));
     setNotice('封面已保存');
+  }
+
+  async function handleGenerateCover(albumId: string) {
+    try {
+      setNotice('正在生成 AI 封面...');
+      const updatedAlbum = await generateAlbumCover(albumId);
+      setAlbums((current) => current.map((album) => (album.id === albumId ? updatedAlbum : album)));
+      setSelectedAlbum((current) => (current?.id === albumId ? updatedAlbum : current));
+      setNotice('AI 封面已生成');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'AI 封面生成失败');
+    }
   }
 
   return (
@@ -177,6 +241,7 @@ export function App() {
               onViewChange={setView}
               isLoading={isLoading}
               onOpen={setSelectedAlbum}
+              onPlay={playAlbum}
               selectedAlbum={selectedAlbum}
             />
           ) : null}
@@ -184,29 +249,60 @@ export function App() {
             <FilesView nas={nas} nasRoot={nasRoot} setNasRoot={setNasRoot} onSave={handleSaveNas} onScan={handleScan} />
           ) : null}
           {view === 'search' ? (
-            <SearchView query={query} setQuery={(value) => void handleSearch(value)} albums={albums} onOpen={setSelectedAlbum} />
+            <SearchView query={query} setQuery={(value) => void handleSearch(value)} albums={albums} onOpen={setSelectedAlbum} onPlay={playAlbum} />
           ) : null}
           {view === 'me' ? <MeView nas={nas} albums={albums} categories={categories} onAddCategory={handleAddCategory} /> : null}
         </section>
 
         {selectedAlbum ? (
-          <AlbumDrawer album={selectedAlbum} onClose={() => setSelectedAlbum(null)} onCoverChange={handleCoverChange} />
+          <AlbumDrawer
+            album={selectedAlbum}
+            onClose={() => setSelectedAlbum(null)}
+            onCoverChange={handleCoverChange}
+            onGenerateCover={handleGenerateCover}
+            onPlay={playAlbum}
+          />
         ) : null}
 
-        {continueAlbum && currentEpisode ? <MiniPlayer album={continueAlbum} episodeTitle={currentEpisode.title} /> : null}
+        {displayedPlayerAlbum && displayedPlayerEpisode ? (
+          <MiniPlayer album={displayedPlayerAlbum} episodeTitle={displayedPlayerEpisode.title} isPlaying={isPlaying} onTogglePlay={togglePlay} />
+        ) : null}
 
         <nav className="bottom-nav" aria-label="底部导航">
-          {navItems.map((item) => {
-            return (
-              <button key={item.view} className={view === item.view ? 'active' : ''} onClick={() => setView(item.view)}>
-                <SketchIcon name={item.icon} />
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
+          <BottomNavButton item={navItems[0]} view={view} setView={setView} />
+          <BottomNavButton item={navItems[1]} view={view} setView={setView} />
+          <button
+            className={isPlaying ? 'nav-player playing' : 'nav-player'}
+            aria-label="打开当前播放项目"
+            onClick={() => {
+              if (displayedPlayerAlbum) setSelectedAlbum(displayedPlayerAlbum);
+            }}
+          >
+            <Play size={22} fill="currentColor" />
+          </button>
+          <BottomNavButton item={navItems[2]} view={view} setView={setView} />
+          <BottomNavButton item={navItems[3]} view={view} setView={setView} />
         </nav>
+        <audio ref={audioRef} onPause={() => setIsPlaying(false)} onPlay={() => setIsPlaying(true)} onEnded={() => setIsPlaying(false)} />
       </main>
     </div>
+  );
+}
+
+function BottomNavButton({
+  item,
+  view,
+  setView
+}: {
+  item: (typeof navItems)[number];
+  view: AppView;
+  setView: (view: AppView) => void;
+}) {
+  return (
+    <button className={view === item.view ? 'active' : ''} onClick={() => setView(item.view)}>
+      <SketchIcon name={item.icon} />
+      <span>{item.label}</span>
+    </button>
   );
 }
 
@@ -220,6 +316,7 @@ function HomeView({
   onViewChange,
   isLoading,
   onOpen,
+  onPlay,
   selectedAlbum
 }: {
   albums: Album[];
@@ -231,6 +328,7 @@ function HomeView({
   onViewChange: (view: AppView) => void;
   isLoading: boolean;
   onOpen: (album: Album) => void;
+  onPlay: (album: Album) => void;
   selectedAlbum: Album | null;
 }) {
   const hero = albums.find((album) => album.status === 'listening') || albums[0];
@@ -247,7 +345,7 @@ function HomeView({
           <h1>{hero?.title || `还没有${kindLabel(activeKind)}`}</h1>
           <p>{hero?.subtitle || '连接 NAS 后扫描本地音频，就会出现在这里。'}</p>
           {hero ? (
-            <button className="primary-action" onClick={() => onOpen(hero)}>
+            <button className="primary-action" onClick={() => onPlay(hero)}>
               <Play size={18} fill="currentColor" />
               继续播放
             </button>
@@ -271,7 +369,7 @@ function HomeView({
       {activeKind === 'drama' ? (
         <div className="drama-list">
           {albums.map((album) => (
-            <DramaListRow key={album.id} album={album} onOpen={onOpen} />
+            <DramaListRow key={album.id} album={album} onOpen={onOpen} onPlay={onPlay} />
           ))}
         </div>
       ) : (
@@ -296,7 +394,7 @@ function HomeView({
   );
 }
 
-function DramaListRow({ album, onOpen }: { album: Album; onOpen: (album: Album) => void }) {
+function DramaListRow({ album, onOpen, onPlay }: { album: Album; onOpen: (album: Album) => void; onPlay: (album: Album) => void }) {
   const nextEpisode = album.episodes.find((episode) => (episode.progress || 0) < 100) || album.episodes[0];
   const lastIndex = nextEpisode ? Math.max(1, album.episodes.findIndex((episode) => episode.id === nextEpisode.id) + 1) : 1;
 
@@ -315,7 +413,7 @@ function DramaListRow({ album, onOpen }: { album: Album; onOpen: (album: Album) 
           </span>
         </span>
       </button>
-      <button className="drama-play" aria-label={`播放 ${album.title}`} onClick={() => onOpen(album)}>
+      <button className="drama-play" aria-label={`播放 ${album.title}`} onClick={() => onPlay(album)}>
         <Play size={22} fill="currentColor" />
       </button>
     </article>
@@ -578,12 +676,14 @@ function SearchView({
   query,
   setQuery,
   albums,
-  onOpen
+  onOpen,
+  onPlay
 }: {
   query: string;
   setQuery: (value: string) => void;
   albums: Album[];
   onOpen: (album: Album) => void;
+  onPlay: (album: Album) => void;
 }) {
   return (
     <section className="panel-page">
@@ -594,13 +694,18 @@ function SearchView({
       </div>
       <div className="result-list">
         {albums.map((album) => (
-          <button key={album.id} onClick={() => onOpen(album)}>
-            <span className="mini-cover" style={{ background: album.cover }} />
-            <span>
-              <strong>{album.title}</strong>
-              <small>{album.subtitle}</small>
-            </span>
-          </button>
+          <div key={album.id} className="result-row">
+            <button className="result-main" onClick={() => onOpen(album)}>
+              <span className="mini-cover" style={{ background: album.cover }} />
+              <span>
+                <strong>{album.title}</strong>
+                <small>{album.subtitle}</small>
+              </span>
+            </button>
+            <button className="inline-play" type="button" aria-label={`播放 ${album.title}`} onClick={() => onPlay(album)}>
+              <Play size={17} fill="currentColor" />
+            </button>
+          </div>
         ))}
       </div>
     </section>
@@ -709,13 +814,18 @@ function MeView({
 function AlbumDrawer({
   album,
   onClose,
-  onCoverChange
+  onCoverChange,
+  onGenerateCover,
+  onPlay
 }: {
   album: Album;
   onClose: () => void;
   onCoverChange: (albumId: string, cover: string) => Promise<void>;
+  onGenerateCover: (albumId: string) => Promise<void>;
+  onPlay: (album: Album) => void;
 }) {
   const [isSavingCover, setIsSavingCover] = useState(false);
+  const [isGeneratingCover, setIsGeneratingCover] = useState(false);
 
   async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -750,7 +860,7 @@ function AlbumDrawer({
             <span className="kind-badge">{kindLabel(album.kind)}</span>
             <h2>{album.title}</h2>
             <p>{album.description}</p>
-            <button className="primary-action">
+            <button className="primary-action" onClick={() => onPlay(album)}>
               <Play size={18} fill="currentColor" />
               播放
             </button>
@@ -758,6 +868,20 @@ function AlbumDrawer({
               <input type="file" accept="image/*" onChange={handleFileChange} />
               {isSavingCover ? '保存中...' : '更换封面'}
             </label>
+            <button
+              className="cover-generate"
+              disabled={isGeneratingCover}
+              onClick={async () => {
+                setIsGeneratingCover(true);
+                try {
+                  await onGenerateCover(album.id);
+                } finally {
+                  setIsGeneratingCover(false);
+                }
+              }}
+            >
+              {isGeneratingCover ? '生成中...' : 'AI 生成封面'}
+            </button>
           </div>
         </div>
         <SectionHeader title="分集" subtitle={`${album.totalEpisodes} 集 · ${album.progress}%`} />
@@ -775,7 +899,17 @@ function AlbumDrawer({
   );
 }
 
-function MiniPlayer({ album, episodeTitle }: { album: Album; episodeTitle: string }) {
+function MiniPlayer({
+  album,
+  episodeTitle,
+  isPlaying,
+  onTogglePlay
+}: {
+  album: Album;
+  episodeTitle: string;
+  isPlaying: boolean;
+  onTogglePlay: () => void;
+}) {
   return (
     <section className="mini-player" aria-label="迷你播放器">
       <div className="mini-cover" style={{ background: album.cover }} />
@@ -783,7 +917,7 @@ function MiniPlayer({ album, episodeTitle }: { album: Album; episodeTitle: strin
         <strong>{album.title}</strong>
         <span>{episodeTitle}</span>
       </div>
-      <button aria-label="播放">
+      <button aria-label={isPlaying ? '暂停' : '播放'} onClick={onTogglePlay}>
         <Play size={19} fill="currentColor" />
       </button>
     </section>

@@ -44,6 +44,11 @@ services:
     environment:
       PORT: "8787"
       AUDIO_ROOT: /media/audio
+      PUBLIC_APP_URL: https://audio.307167312.xyz
+      OPENAI_API_KEY: ""
+      OPENAI_IMAGE_MODEL: gpt-image-1
+      AUTO_GENERATE_COVERS: "false"
+      MAX_AUTO_GENERATED_COVERS_PER_SCAN: "8"
     volumes:
       - /Audio:/media/audio:ro
       - /docker/private-audio-room/data:/app/data
@@ -62,6 +67,19 @@ http://NAS局域网IP:8787
 ```
 
 然后执行扫描。
+
+### AI 自动生成封面
+
+如果你希望导入广播剧或有声书时自动生成封面，在绿联 NAS 的 Docker 项目环境变量里填写：
+
+```yaml
+OPENAI_API_KEY: 新生成的 OpenAI API Key
+OPENAI_IMAGE_MODEL: gpt-image-1
+AUTO_GENERATE_COVERS: "true"
+MAX_AUTO_GENERATED_COVERS_PER_SCAN: "8"
+```
+
+注意：不要把真实 API Key 提交到 GitHub。已经发到聊天或截图里的 key 建议立即删除并重新创建。
 
 ## 外网访问
 

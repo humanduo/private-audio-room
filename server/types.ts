@@ -37,3 +37,12 @@ export type NasConfig = {
   connected: boolean;
   lastScanAt?: string;
 };
+
+export type AppConfig = {
+  name: string;
+  publicUrl: string;
+  mediaRoot: string;
+  maxScanFiles: number;
+  supportedAudioExtensions: string[];
+  supportedCoverNames: string[];
+};

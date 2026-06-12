@@ -8,6 +8,12 @@ services:
     environment:
       PORT: "8787"
       AUDIO_ROOT: /media/audio
+      PUBLIC_APP_URL: https://audio.307167312.xyz
+      # Fill this in the NAS Docker UI. Do not commit a real key.
+      OPENAI_API_KEY: ""
+      OPENAI_IMAGE_MODEL: gpt-image-1
+      AUTO_GENERATE_COVERS: "false"
+      MAX_AUTO_GENERATED_COVERS_PER_SCAN: "8"
     volumes:
       - /Audio:/media/audio:ro
       - /docker/private-audio-room/data:/app/data

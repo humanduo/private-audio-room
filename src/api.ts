@@ -66,3 +66,10 @@ export async function updateAlbumCover(albumId: string, cover: string): Promise<
   if (!response.ok) throw new Error(data.error || '封面保存失败');
   return data.album;
 }
+
+export async function generateAlbumCover(albumId: string): Promise<Album> {
+  const response = await fetch(`/api/albums/${albumId}/cover/generate`, { method: 'POST' });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'AI 封面生成失败');
+  return data.album;
+}
