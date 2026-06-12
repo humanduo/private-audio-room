@@ -1,0 +1,16 @@
+services:
+  private-audio-room:
+    build: .
+    container_name: private-audio-room
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      PORT: "8787"
+      AUDIO_ROOT: /media/audio
+    volumes:
+      # On UGREEN NAS, change the left side to your audio folder, for example:
+      # - /Audio:/media/audio:ro
+      - ./media/audio:/media/audio:ro
+      # App settings, categories, scan results, and covers saved as data URLs.
+      - ./data:/app/data
