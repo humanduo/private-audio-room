@@ -1,0 +1,13 @@
+services:
+  private-audio-room:
+    image: ghcr.io/humanduo/private-audio-room:latest
+    container_name: private-audio-room
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      PORT: "8787"
+      AUDIO_ROOT: /media/audio
+    volumes:
+      - /Audio:/media/audio:ro
+      - /docker/private-audio-room/data:/app/data

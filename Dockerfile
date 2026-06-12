@@ -1,25 +1,27 @@
-FROM node:24-alpine AS build
+FROM node:20-alpine AS build
 
 WORKDIR /app
+ENV NODE_ENV=development
 
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm install --include=dev --no-audit --no-fund
+RUN npm install --no-save typescript vite @vitejs/plugin-react --no-audit --no-fund
 
 COPY . .
-RUN npm run build
+RUN npm exec -- tsc -b && npm exec -- vite build
+RUN npm prune --omit=dev --no-audit --no-fund
 
-FROM node:24-alpine AS runtime
+FROM node:20-alpine AS runtime
 
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=8787
 ENV AUDIO_ROOT=/media/audio
 
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
-
 COPY --from=build /app/dist ./dist
 COPY server ./server
+COPY package.json package-lock.json ./
+COPY --from=build /app/node_modules ./node_modules
 
 RUN mkdir -p /app/data /media/audio
 
