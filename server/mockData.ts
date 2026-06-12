@@ -12,8 +12,7 @@ export const mockAlbums: Album[] = [
     kind: 'drama',
     title: '雾城来信',
     subtitle: '悬疑广播剧 · 第一季',
-    cover:
-      'linear-gradient(145deg, rgba(29, 25, 40, .42), rgba(255, 99, 112, .18)), radial-gradient(circle at 68% 38%, #f6b46f 0 4%, transparent 5%), linear-gradient(135deg, #2d3342 0%, #6f6f78 42%, #e4a293 100%)',
+    cover: '/assets/covers/fog-city-letters.png',
     creator: '多人声音剧场',
     status: 'listening',
     progress: 62,

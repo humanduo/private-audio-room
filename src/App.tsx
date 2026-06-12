@@ -1,10 +1,17 @@
 import {
+  ChevronDown,
   Clock3,
+  Download,
   FolderOpen,
-  Headphones,
+  Heart,
   Library,
+  ListMusic,
+  MoreHorizontal,
   Play,
+  RotateCcw,
   Search,
+  SkipBack,
+  SkipForward,
   Sparkles
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -44,6 +51,16 @@ const navItems: Array<{ view: AppView; label: string; icon: SketchIconName }> = 
 
 function kindLabel(kind: MediaKind) {
   return tabs.find((tab) => tab.kind === kind)?.label || '内容';
+}
+
+function coverBackground(cover?: string) {
+  if (!cover) return 'linear-gradient(145deg, #fff6f2, #ffe4e5)';
+  if (cover.startsWith('linear-gradient(') || cover.startsWith('radial-gradient(')) return cover;
+  return `url(${JSON.stringify(cover)})`;
+}
+
+function isImageCover(cover?: string) {
+  return Boolean(cover && !cover.includes('gradient('));
 }
 
 export function App() {
@@ -264,10 +281,6 @@ export function App() {
           />
         ) : null}
 
-        {displayedPlayerAlbum && displayedPlayerEpisode ? (
-          <MiniPlayer album={displayedPlayerAlbum} episodeTitle={displayedPlayerEpisode.title} isPlaying={isPlaying} onTogglePlay={togglePlay} />
-        ) : null}
-
         <nav className="bottom-nav" aria-label="底部导航">
           <BottomNavButton item={navItems[0]} view={view} setView={setView} />
           <BottomNavButton item={navItems[1]} view={view} setView={setView} />
@@ -278,7 +291,10 @@ export function App() {
               if (displayedPlayerAlbum) setSelectedAlbum(displayedPlayerAlbum);
             }}
           >
-            <Play size={22} fill="currentColor" />
+            <span className="nav-player-cover" style={{ background: coverBackground(displayedPlayerAlbum?.cover) }} />
+            <span className="nav-player-glyph">
+              <Play size={15} fill="currentColor" />
+            </span>
           </button>
           <BottomNavButton item={navItems[2]} view={view} setView={setView} />
           <BottomNavButton item={navItems[3]} view={view} setView={setView} />
@@ -339,7 +355,8 @@ function HomeView({
 
   return (
     <>
-      <section className="hero-card">
+      <section className="hero-card" style={{ '--hero-cover': coverBackground(hero?.cover) } as React.CSSProperties}>
+        <div className="hero-bg" aria-hidden="true" />
         <div>
           <p className="eyebrow">继续听</p>
           <h1>{hero?.title || `还没有${kindLabel(activeKind)}`}</h1>
@@ -357,9 +374,7 @@ function HomeView({
             </div>
           ) : null}
         </div>
-        <div className="hero-cover" style={{ background: hero?.cover }}>
-          <Headphones size={44} />
-        </div>
+        <div className="hero-cover" style={{ background: coverBackground(hero?.cover) }} aria-hidden="true" />
       </section>
 
       <QuickSketchStrip activeKind={activeKind} onKindChange={onKindChange} onViewChange={onViewChange} />
@@ -401,7 +416,7 @@ function DramaListRow({ album, onOpen, onPlay }: { album: Album; onOpen: (album:
   return (
     <article className="drama-row">
       <button className="drama-row-main" onClick={() => onOpen(album)}>
-        <span className="drama-row-cover" style={{ background: album.cover }} />
+        <span className="drama-row-cover" style={{ background: coverBackground(album.cover) }} />
         <span className="drama-row-copy">
           <strong>{album.title}</strong>
           <small>第一季 · 共 {album.totalEpisodes} 集</small>
@@ -433,7 +448,6 @@ function QuickSketchStrip({
     { icon: 'drama', label: '广播剧', kind: 'drama' },
     { icon: 'book', label: '有声书', kind: 'book' },
     { icon: 'course', label: '网课', kind: 'course' },
-    { icon: 'files', label: '文件', view: 'files' },
     { icon: 'category', label: '分类', view: 'home' }
   ];
 
@@ -614,8 +628,8 @@ function CategoryChips({
 function AlbumCard({ album, active, onOpen }: { album: Album; active?: boolean; onOpen: (album: Album) => void }) {
   return (
     <button className={active ? 'album-card active' : 'album-card'} onClick={() => onOpen(album)}>
-      <div className="album-cover" style={{ background: album.cover }}>
-        <Sparkles size={22} />
+      <div className="album-cover" style={{ background: coverBackground(album.cover) }}>
+        {isImageCover(album.cover) ? null : <Sparkles size={22} />}
       </div>
       <div className="album-copy">
         <strong>{album.title}</strong>
@@ -696,7 +710,7 @@ function SearchView({
         {albums.map((album) => (
           <div key={album.id} className="result-row">
             <button className="result-main" onClick={() => onOpen(album)}>
-              <span className="mini-cover" style={{ background: album.cover }} />
+              <span className="mini-cover" style={{ background: coverBackground(album.cover) }} />
               <span>
                 <strong>{album.title}</strong>
                 <small>{album.subtitle}</small>
@@ -826,6 +840,7 @@ function AlbumDrawer({
 }) {
   const [isSavingCover, setIsSavingCover] = useState(false);
   const [isGeneratingCover, setIsGeneratingCover] = useState(false);
+  const activeEpisode = album.episodes.find((episode) => (episode.progress || 0) < 100) || album.episodes[0];
 
   async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -849,77 +864,120 @@ function AlbumDrawer({
     <section className="album-drawer" aria-label="专辑详情">
       <div className="drawer-backdrop" onClick={onClose} />
       <div className="drawer-panel">
-        <button className="drawer-close" onClick={onClose}>
-          关闭
-        </button>
-        <div className="detail-hero">
-          <div className="detail-cover" style={{ background: album.cover }}>
-            <Headphones size={48} />
-          </div>
+        <div className="player-ambient" style={{ background: coverBackground(album.cover) }} aria-hidden="true" />
+        <div className="player-topbar">
+          <button className="player-icon-button" onClick={onClose} aria-label="关闭">
+            <ChevronDown size={27} />
+          </button>
           <div>
-            <span className="kind-badge">{kindLabel(album.kind)}</span>
-            <h2>{album.title}</h2>
-            <p>{album.description}</p>
-            <button className="primary-action" onClick={() => onPlay(album)}>
-              <Play size={18} fill="currentColor" />
-              播放
-            </button>
-            <label className="cover-upload">
-              <input type="file" accept="image/*" onChange={handleFileChange} />
-              {isSavingCover ? '保存中...' : '更换封面'}
-            </label>
-            <button
-              className="cover-generate"
-              disabled={isGeneratingCover}
-              onClick={async () => {
-                setIsGeneratingCover(true);
-                try {
-                  await onGenerateCover(album.id);
-                } finally {
-                  setIsGeneratingCover(false);
-                }
-              }}
-            >
-              {isGeneratingCover ? '生成中...' : 'AI 生成封面'}
-            </button>
+            <strong>{album.title}</strong>
+            <span>{album.subtitle}</span>
+          </div>
+          <button className="player-icon-button" aria-label="刷新">
+            <RotateCcw size={24} />
+          </button>
+        </div>
+
+        <div className="player-cover-stage" style={{ background: coverBackground(album.cover) }}>
+          <div className="player-cover-title">
+            <span>{kindLabel(album.kind)} · {album.totalEpisodes} 集</span>
+            <strong>{album.title}</strong>
           </div>
         </div>
-        <SectionHeader title="分集" subtitle={`${album.totalEpisodes} 集 · ${album.progress}%`} />
-        <div className="episode-list">
-          {album.episodes.map((episode, index) => (
-            <button key={episode.id}>
-              <span>{String(index + 1).padStart(2, '0')}</span>
-              <strong>{episode.title}</strong>
-              <small>{episode.duration}</small>
+
+        <div className="player-sheet">
+          <div className="player-actions" aria-label="播放操作">
+            <button>
+              <Heart size={27} />
+              <span>喜欢</span>
             </button>
-          ))}
+            <button>
+              <Download size={26} />
+              <span>缓存</span>
+            </button>
+            <button>
+              <Sparkles size={28} />
+              <span>追剧</span>
+            </button>
+            <button>
+              <FolderOpen size={27} />
+              <span>文件</span>
+            </button>
+            <button>
+              <MoreHorizontal size={29} />
+              <span>更多</span>
+            </button>
+          </div>
+
+          <div className="player-progress">
+            <div className="progress-line">
+              <span style={{ width: `${album.progress}%` }} />
+            </div>
+            <div>
+              <small>{activeEpisode?.progress ? `${activeEpisode.progress}%` : '00:02'}</small>
+              <small>{activeEpisode?.duration || '00:00'}</small>
+            </div>
+          </div>
+
+          <div className="transport-controls">
+            <button aria-label="后退 15 秒">15s</button>
+            <button aria-label="上一集">
+              <SkipBack size={30} fill="currentColor" />
+            </button>
+            <button className="transport-play" onClick={() => onPlay(album)} aria-label="播放">
+              <Play size={34} fill="currentColor" />
+            </button>
+            <button aria-label="下一集">
+              <SkipForward size={30} fill="currentColor" />
+            </button>
+            <button aria-label="播放列表">
+              <ListMusic size={32} />
+            </button>
+          </div>
+
+          <div className="player-tabs">
+            <button className="active">简介</button>
+            <button>分集</button>
+            <button>文件</button>
+          </div>
+
+          <div className="player-summary">
+            <span className="kind-badge">{kindLabel(album.kind)}</span>
+            <p>{album.description}</p>
+            <div className="cover-tools">
+              <label className="cover-upload">
+                <input type="file" accept="image/*" onChange={handleFileChange} />
+                {isSavingCover ? '保存中...' : '更换封面'}
+              </label>
+              <button
+                className="cover-generate"
+                disabled={isGeneratingCover}
+                onClick={async () => {
+                  setIsGeneratingCover(true);
+                  try {
+                    await onGenerateCover(album.id);
+                  } finally {
+                    setIsGeneratingCover(false);
+                  }
+                }}
+              >
+                {isGeneratingCover ? '生成中...' : 'AI 封面'}
+              </button>
+            </div>
+          </div>
+
+          <SectionHeader title="分集" subtitle={`${album.totalEpisodes} 集 · ${album.progress}%`} />
+          <div className="episode-list player-episode-list">
+            {album.episodes.map((episode, index) => (
+              <button key={episode.id}>
+                <span>{String(index + 1).padStart(2, '0')}</span>
+                <strong>{episode.title}</strong>
+                <small>{episode.duration}</small>
+              </button>
+            ))}
+          </div>
         </div>
       </div>
-    </section>
-  );
-}
-
-function MiniPlayer({
-  album,
-  episodeTitle,
-  isPlaying,
-  onTogglePlay
-}: {
-  album: Album;
-  episodeTitle: string;
-  isPlaying: boolean;
-  onTogglePlay: () => void;
-}) {
-  return (
-    <section className="mini-player" aria-label="迷你播放器">
-      <div className="mini-cover" style={{ background: album.cover }} />
-      <div>
-        <strong>{album.title}</strong>
-        <span>{episodeTitle}</span>
-      </div>
-      <button aria-label={isPlaying ? '暂停' : '播放'} onClick={onTogglePlay}>
-        <Play size={19} fill="currentColor" />
-      </button>
     </section>
   );
 }

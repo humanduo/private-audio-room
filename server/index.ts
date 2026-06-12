@@ -27,7 +27,8 @@ function normalizeState(state: Partial<AppState>): AppState {
   const albums = existingAlbums.map((album) => {
     const defaultAlbum = defaultAlbumMap.get(album.id);
     if (!defaultAlbum) return album;
-    const hasCustomCover = album.cover?.startsWith('data:image/');
+    const hasCustomCover =
+      album.cover?.startsWith('data:image/') || album.cover?.startsWith('/covers/') || album.cover?.startsWith('/assets/');
     return {
       ...defaultAlbum,
       ...album,
@@ -390,7 +391,12 @@ app.get('/api/albums/:id', (req, res) => {
 app.patch('/api/albums/:id/cover', (req, res) => {
   const cover = String(req.body.cover || '').trim();
   if (!cover) return res.status(400).json({ error: 'Cover is required' });
-  if (!cover.startsWith('data:image/') && !cover.startsWith('linear-gradient(') && !cover.startsWith('/covers/')) {
+  if (
+    !cover.startsWith('data:image/') &&
+    !cover.startsWith('linear-gradient(') &&
+    !cover.startsWith('/covers/') &&
+    !cover.startsWith('/assets/')
+  ) {
     return res.status(400).json({ error: 'Cover must be an image data URL or supported gradient' });
   }
 
