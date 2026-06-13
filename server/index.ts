@@ -207,6 +207,25 @@ function extractJsonObject(text: string) {
   }
 }
 
+function networkErrorMessage(error: unknown, target: string) {
+  const cause = error && typeof error === 'object' && 'cause' in error ? (error as { cause?: unknown }).cause : null;
+  const code =
+    cause && typeof cause === 'object' && 'code' in cause
+      ? String((cause as { code?: unknown }).code)
+      : error && typeof error === 'object' && 'code' in error
+        ? String((error as { code?: unknown }).code)
+        : '';
+  const detail = error instanceof Error ? error.message : String(error || 'fetch failed');
+  const hints: Record<string, string> = {
+    ENOTFOUND: 'DNS 解析失败，请检查 NAS Docker 的 DNS 或网络。',
+    EAI_AGAIN: 'DNS 临时失败，请稍后重试，或给 Docker 配置 DNS。',
+    ECONNRESET: '连接被重置，可能是 NAS 网络、代理或出口被拦截。',
+    ETIMEDOUT: '连接超时，请检查 NAS 是否能访问外网。',
+    UND_ERR_CONNECT_TIMEOUT: '连接超时，请检查 NAS Docker 是否能访问外网。'
+  };
+  return [`DeepSeek 网络请求失败：${target}`, code ? `错误码 ${code}` : '', hints[code] || detail].filter(Boolean).join(' · ');
+}
+
 function decodeHtml(value: string) {
   return value
     .replace(/&quot;/g, '"')
@@ -311,22 +330,27 @@ async function analyzeAlbumMetadataWithDeepSeek(album: Album) {
     '{"author":"","cast":[],"summary":"","genres":[],"relationship":"","audience":"","finishStatus":"未知","confidence":0.5,"needsReview":true}'
   ].join('\n');
 
-  const response = await fetch(baseUrl, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0.2,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: '你负责把广播剧资料整理成严格 JSON。' },
-        { role: 'user', content: prompt }
-      ]
-    })
-  });
+  let response: Response;
+  try {
+    response = await fetch(baseUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.2,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: '你负责把广播剧资料整理成严格 JSON。' },
+          { role: 'user', content: prompt }
+        ]
+      })
+    });
+  } catch (error) {
+    throw new Error(networkErrorMessage(error, baseUrl));
+  }
 
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
