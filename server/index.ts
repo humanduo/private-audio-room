@@ -1,14 +1,16 @@
 import cors from 'cors';
 import express from 'express';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultCategories, defaultNasConfig, mockAlbums } from './mockData';
-import type { Album, AppConfig, Category, MediaKind, NasConfig } from './types';
+import type { Album, AppConfig, Category, MediaKind, NasConfig, UserProfile } from './types';
 
 const app = express();
 const port = Number(process.env.PORT || 8787);
 const audioExtensions = new Set(['.mp3', '.m4a', '.m4b', '.aac', '.flac', '.wav', '.ogg', '.opus']);
+const audioSuffixes = [...audioExtensions].map((extension) => extension.slice(1));
 const coverFileNames = ['cover.jpg', 'cover.jpeg', 'cover.png', 'folder.jpg', 'folder.jpeg', 'folder.png'];
 const libraryFolderNames = new Set(['广播剧', '剧集', '有声书', '听书', '网课', '课程', 'course', 'courses', 'book', 'books', 'drama', 'dramas']);
 const maxScanFiles = Number(process.env.MAX_SCAN_FILES || 2000);
@@ -19,7 +21,7 @@ const coversDir = path.resolve('data/covers');
 app.use(cors());
 app.use(express.json());
 
-type AppState = { nas: NasConfig; albums: Album[]; categories: Category[] };
+type AppState = { nas: NasConfig; albums: Album[]; categories: Category[]; profile: UserProfile };
 
 function normalizeState(state: Partial<AppState>): AppState {
   const defaultAlbumMap = new Map(mockAlbums.map((album) => [album.id, album]));
@@ -40,13 +42,14 @@ function normalizeState(state: Partial<AppState>): AppState {
   return {
     nas: state.nas || defaultNasConfig,
     albums,
-    categories: state.categories?.length ? state.categories : defaultCategories
+    categories: state.categories?.length ? state.categories : defaultCategories,
+    profile: state.profile || { avatar: '' }
   };
 }
 
 function readState(): AppState {
   if (!fs.existsSync(stateFile)) {
-    return { nas: defaultNasConfig, albums: mockAlbums, categories: defaultCategories };
+    return { nas: defaultNasConfig, albums: mockAlbums, categories: defaultCategories, profile: { avatar: '' } };
   }
 
   const raw = fs.readFileSync(stateFile, 'utf-8');
@@ -109,12 +112,18 @@ function findFolderCover(folderPath: string) {
 }
 
 function audioContentType(filePath: string) {
-  const ext = path.extname(filePath).toLowerCase();
+  const lower = filePath.toLowerCase();
+  const ext = path.extname(lower);
   if (ext === '.mp3') return 'audio/mpeg';
   if (ext === '.m4a' || ext === '.m4b' || ext === '.aac') return 'audio/mp4';
   if (ext === '.flac') return 'audio/flac';
   if (ext === '.wav') return 'audio/wav';
   if (ext === '.ogg' || ext === '.opus') return 'audio/ogg';
+  if (lower.endsWith('mp3')) return 'audio/mpeg';
+  if (lower.endsWith('m4a') || lower.endsWith('m4b') || lower.endsWith('aac')) return 'audio/mp4';
+  if (lower.endsWith('flac')) return 'audio/flac';
+  if (lower.endsWith('wav')) return 'audio/wav';
+  if (lower.endsWith('ogg') || lower.endsWith('opus')) return 'audio/ogg';
   return 'application/octet-stream';
 }
 
@@ -130,6 +139,10 @@ function isPlaceholderCover(cover: string) {
 
 function safeFileName(value: string) {
   return value.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
+}
+
+function stableId(value: string, length = 18) {
+  return crypto.createHash('sha1').update(value).digest('base64url').slice(0, length);
 }
 
 function coverPromptForAlbum(album: Album) {
@@ -222,7 +235,8 @@ function naturalSort(values: string[]) {
 
 function normalizeDisplayName(value: string) {
   return value
-    .replace(/\.[a-z0-9]{2,5}$/i, '')
+    .replace(new RegExp(`\\.(${audioSuffixes.join('|')})$`, 'i'), '')
+    .replace(new RegExp(`(${audioSuffixes.join('|')})$`, 'i'), '')
     .replace(/[._-]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -230,13 +244,110 @@ function normalizeDisplayName(value: string) {
 
 function stripNoise(value: string) {
   return normalizeDisplayName(value)
+    .replace(/^[a-z]\s+/i, '')
+    .replace(/^《(.+)》$/, '$1')
     .replace(/【[^】]*】/g, '')
     .replace(/\[[^\]]*]/g, '')
     .replace(/（[^）]*）/g, '')
     .replace(/\([^)]*\)/g, '')
+    .replace(/\b(广播剧|有声剧|有声书|网课|课程|完结|更新|小说|原著)\b/gi, '')
     .replace(/\b(mp3|m4a|m4b|flac|aac|wav|opus|ogg)\b/gi, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function cleanAlbumTitle(value: string) {
+  return stripNoise(value)
+    .replace(/^《(.+)》$/, '$1')
+    .replace(/\s*[&＆].*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function chineseNumberToDigit(value: string) {
+  const normalized = value.replace(/两/g, '二');
+  const digits: Record<string, number> = {
+    零: 0,
+    〇: 0,
+    一: 1,
+    二: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+    十: 10
+  };
+  if (/^\d+$/.test(normalized)) return Number(normalized);
+  if (normalized === '十') return 10;
+  if (normalized.startsWith('十')) return 10 + (digits[normalized.slice(1)] || 0);
+  if (normalized.includes('十')) {
+    const [ten, one] = normalized.split('十');
+    return (digits[ten] || 1) * 10 + (digits[one] || 0);
+  }
+  return digits[normalized] || NaN;
+}
+
+function digitToChinese(value: string) {
+  const digits = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
+  const number = Number(value);
+  if (!Number.isFinite(number)) return value;
+  if (number <= 10) return digits[number];
+  if (number < 20) return `十${digits[number - 10]}`;
+  if (number < 100) {
+    const tens = Math.floor(number / 10);
+    const ones = number % 10;
+    return `${digits[tens]}十${ones ? digits[ones] : ''}`;
+  }
+  return value;
+}
+
+function episodeInfoFromName(fileName: string) {
+  const normalized = normalizeDisplayName(fileName).replace(/\s+/g, ' ');
+  const patterns = [
+    /第\s*([0-9一二三四五六七八九十两]+)\s*(集|期|话|章)\s*([上下])?/i,
+    /(?:^|\s)([0-9]{1,3})\s*([上下])?(?=$|\s|[（(【\[.。·:：-])/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    if (!match) continue;
+
+    const number = chineseNumberToDigit(match[1]);
+    if (!Number.isFinite(number) || number <= 0 || number > 300) continue;
+
+    const side = match[3] || match[2] || '';
+    const label = `${String(number).padStart(2, '0')}${side ? ` ${side}` : ''}`;
+    const rest = normalized
+      .slice((match.index || 0) + match[0].length)
+      .replace(/^[\s·.。:：-]+/, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return { number, label, rest };
+  }
+
+  return null;
+}
+
+function seasonLabelFromFolder(value: string) {
+  const normalized = normalizeDisplayName(value);
+  const match = normalized.match(/第?\s*([0-9一二三四五六七八九十两]+)\s*季/i);
+  if (!match) return '';
+
+  const rawNumber = match[1].replace('两', '二');
+  const numberLabel = /^\d+$/.test(rawNumber) ? digitToChinese(rawNumber) : rawNumber;
+  const side = /（\s*上\s*）|\(\s*上\s*\)|\b上\b/.test(value)
+    ? '（上）'
+    : /（\s*下\s*）|\(\s*下\s*\)|\b下\b/.test(value)
+      ? '（下）'
+      : '';
+  return `第${numberLabel}季${side}`;
+}
+
+function shouldSplitAsSeasonFolder(value: string) {
+  return Boolean(seasonLabelFromFolder(value));
 }
 
 function albumInfoForFile(root: string, file: string) {
@@ -255,29 +366,40 @@ function albumInfoForFile(root: string, file: string) {
   const first = directoryParts[0].toLowerCase();
   if (libraryFolderNames.has(directoryParts[0]) || libraryFolderNames.has(first)) {
     const albumPart = directoryParts[1] || directoryParts[0];
-    const keyParts = directoryParts[1] ? directoryParts.slice(0, 2) : directoryParts.slice(0, 1);
+    const seasonPart = directoryParts[2];
+    const hasSeasonFolder = Boolean(seasonPart && shouldSplitAsSeasonFolder(seasonPart));
+    const keyParts = hasSeasonFolder
+      ? directoryParts.slice(0, 3)
+      : directoryParts[1]
+        ? directoryParts.slice(0, 2)
+        : directoryParts.slice(0, 1);
+    const baseTitle = cleanAlbumTitle(albumPart);
+    const seasonLabel = hasSeasonFolder ? seasonLabelFromFolder(seasonPart) : '';
     return {
       key: keyParts.join(path.sep),
       folderPath: path.join(root, ...keyParts),
-      title: normalizeDisplayName(albumPart)
+      title: seasonLabel ? `${baseTitle} ${seasonLabel}` : baseTitle
     };
   }
 
   return {
     key: directoryParts[0],
     folderPath: path.join(root, directoryParts[0]),
-    title: normalizeDisplayName(directoryParts[0])
+    title: cleanAlbumTitle(directoryParts[0])
   };
 }
 
 function cleanEpisodeTitle(file: string, albumTitle: string, index: number) {
   const fallback = `${String(index + 1).padStart(2, '0')}`;
+  const episodeInfo = episodeInfoFromName(path.basename(file));
   const albumTokens = new Set(
     stripNoise(albumTitle)
       .split(/\s+/)
       .filter((token) => token.length > 1)
   );
-  const raw = stripNoise(path.basename(file, path.extname(file)));
+  const raw = stripNoise(path.basename(file))
+    .replace(/第\s*[0-9一二三四五六七八九十两]+\s*季/gi, '')
+    .replace(/^\d{1,3}\s*$/, (value) => value.padStart(2, '0'));
   const withoutAlbum = raw
     .split(/\s+/)
     .filter((token) => !albumTokens.has(token))
@@ -286,12 +408,48 @@ function cleanEpisodeTitle(file: string, albumTitle: string, index: number) {
     .replace(/\s+/g, ' ')
     .trim();
 
+  if (episodeInfo) {
+    if (!episodeInfo.rest) return episodeInfo.label;
+    const rest = stripNoise(episodeInfo.rest)
+      .split(/\s+/)
+      .filter((token) => !albumTokens.has(token))
+      .join(' ')
+      .replace(/^[-·.。:：]+/, '')
+      .trim();
+    return rest && rest.length <= 28 ? `${episodeInfo.label} ${rest}` : episodeInfo.label;
+  }
+
   if (!withoutAlbum) return fallback;
   if (withoutAlbum.length > 42 && /(\d{1,4}|[一二三四五六七八九十百零〇两]+)\s*(集|期|话|章)?/.test(withoutAlbum)) {
     return fallback;
   }
 
   return withoutAlbum;
+}
+
+function audioFileSortKey(file: string) {
+  const info = episodeInfoFromName(path.basename(file));
+  return {
+    bucket: info ? 0 : 1,
+    number: info?.number || Number.MAX_SAFE_INTEGER,
+    name: path.basename(file)
+  };
+}
+
+function sortAudioFiles(files: string[]) {
+  return [...files].sort((a, b) => {
+    const aKey = audioFileSortKey(a);
+    const bKey = audioFileSortKey(b);
+    if (aKey.bucket !== bKey.bucket) return aKey.bucket - bKey.bucket;
+    if (aKey.number !== bKey.number) return aKey.number - bKey.number;
+    return aKey.name.localeCompare(bKey.name, 'zh-Hans-CN', { numeric: true, sensitivity: 'base' });
+  });
+}
+
+function isAudioFileName(fileName: string) {
+  const lower = fileName.toLowerCase();
+  if (audioExtensions.has(path.extname(lower))) return true;
+  return audioSuffixes.some((suffix) => lower.endsWith(suffix));
 }
 
 function listAudioFiles(root: string, limit = maxScanFiles) {
@@ -305,7 +463,7 @@ function listAudioFiles(root: string, limit = maxScanFiles) {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         if (!entry.name.startsWith('.')) walk(fullPath);
-      } else if (audioExtensions.has(path.extname(entry.name).toLowerCase())) {
+      } else if (isAudioFileName(entry.name)) {
         files.push(fullPath);
       }
     }
@@ -325,12 +483,12 @@ function albumsFromFiles(root: string, files: string[]): Album[] {
   }
 
   return [...groups.entries()].map(([group, albumGroup], index) => {
-    const sortedFiles = naturalSort(albumGroup.files);
+    const sortedFiles = sortAudioFiles(albumGroup.files);
     const kind = inferKindFromPath(group);
     const title = albumGroup.title || `本地专辑 ${index + 1}`;
     const folderCover = findFolderCover(albumGroup.folderPath);
     return {
-      id: `local-${index}-${Buffer.from(group).toString('base64url').slice(0, 10)}`,
+      id: `local-${stableId(group)}`,
       kind,
       title,
       subtitle: `${kind === 'drama' ? '广播剧' : kind === 'book' ? '有声书' : '网课'} · ${sortedFiles.length} 集`,
@@ -343,7 +501,7 @@ function albumsFromFiles(root: string, files: string[]): Album[] {
       tags: ['NAS', kind === 'drama' ? '广播剧' : kind === 'book' ? '有声书' : '网课'],
       description: `来自 NAS 目录：${group}`,
       episodes: sortedFiles.map((file, fileIndex) => ({
-        id: `local-${index}-${fileIndex}`,
+        id: `ep-${stableId(path.relative(root, file), 24)}`,
         title: cleanEpisodeTitle(file, title, fileIndex),
         duration: '--:--',
         progress: 0,
@@ -449,6 +607,22 @@ app.post('/api/categories', (req, res) => {
   res.json({ category, categories: state.categories });
 });
 
+app.get('/api/profile', (_req, res) => {
+  res.json({ profile: readState().profile });
+});
+
+app.patch('/api/profile', (req, res) => {
+  const avatar = String(req.body.avatar || '').trim();
+  if (avatar && !avatar.startsWith('data:image/')) {
+    return res.status(400).json({ error: 'Avatar must be an image data URL' });
+  }
+
+  const state = readState();
+  state.profile = { ...state.profile, avatar };
+  writeState(state);
+  res.json({ profile: state.profile });
+});
+
 app.get('/api/nas', (_req, res) => {
   res.json({ nas: readState().nas });
 });
@@ -482,7 +656,8 @@ app.post('/api/scan', async (_req, res) => {
   const next = {
     nas: { ...state.nas, connected: true, lastScanAt: new Date().toISOString() },
     albums: coverResult.albums.length ? coverResult.albums : state.albums,
-    categories: state.categories
+    categories: state.categories,
+    profile: state.profile
   };
   writeState(next);
   res.json({

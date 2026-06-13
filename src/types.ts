@@ -47,4 +47,8 @@ export type Category = {
   name: string;
 };
 
+export type UserProfile = {
+  avatar: string;
+};
+
 export type AppView = 'home' | 'files' | 'search' | 'me';

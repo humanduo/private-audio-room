@@ -1,4 +1,4 @@
-import type { Album, Category, MediaKind, NasConfig } from './types';
+import type { Album, Category, MediaKind, NasConfig, UserProfile } from './types';
 
 const jsonHeaders = { 'Content-Type': 'application/json' };
 
@@ -29,6 +29,24 @@ export async function createCategory(name: string): Promise<Category[]> {
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || '分类保存失败');
   return data.categories;
+}
+
+export async function fetchProfile(): Promise<UserProfile> {
+  const response = await fetch('/api/profile');
+  if (!response.ok) throw new Error('个人资料加载失败');
+  const data = await response.json();
+  return data.profile;
+}
+
+export async function updateProfileAvatar(avatar: string): Promise<UserProfile> {
+  const response = await fetch('/api/profile', {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify({ avatar })
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || '头像保存失败');
+  return data.profile;
 }
 
 export async function fetchNas(): Promise<NasConfig> {

@@ -4,9 +4,9 @@ import {
   Download,
   FolderOpen,
   Heart,
-  Library,
   ListMusic,
   MoreHorizontal,
+  Pause,
   Play,
   RotateCcw,
   Search,
@@ -15,7 +15,18 @@ import {
   Sparkles
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { createCategory, fetchAlbums, fetchCategories, fetchNas, generateAlbumCover, saveNas, scanNas, updateAlbumCover } from './api';
+import {
+  createCategory,
+  fetchAlbums,
+  fetchCategories,
+  fetchNas,
+  fetchProfile,
+  generateAlbumCover,
+  saveNas,
+  scanNas,
+  updateAlbumCover,
+  updateProfileAvatar
+} from './api';
 import type { Album, AppView, Category, Episode, MediaKind, NasConfig } from './types';
 
 const tabs: Array<{ kind: MediaKind; label: string }> = [
@@ -63,6 +74,14 @@ function isImageCover(cover?: string) {
   return Boolean(cover && !cover.includes('gradient('));
 }
 
+function formatClock(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '00:00';
+  const total = Math.floor(seconds);
+  const minutes = Math.floor(total / 60);
+  const rest = total % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`;
+}
+
 export function App() {
   const [view, setView] = useState<AppView>('home');
   const [activeKind, setActiveKind] = useState<MediaKind>('drama');
@@ -78,6 +97,8 @@ export function App() {
   const [playerAlbum, setPlayerAlbum] = useState<Album | null>(null);
   const [playerEpisode, setPlayerEpisode] = useState<Episode | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [audioTime, setAudioTime] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   async function load(kind = activeKind, q = query, category = activeCategory) {
@@ -107,6 +128,7 @@ export function App() {
   const currentEpisode = continueAlbum?.episodes.find((episode) => (episode.progress || 0) < 100) || continueAlbum?.episodes[0];
   const displayedPlayerAlbum = playerAlbum || continueAlbum;
   const displayedPlayerEpisode = playerEpisode || currentEpisode;
+  const audioProgress = audioDuration > 0 ? Math.min(100, Math.round((audioTime / audioDuration) * 100)) : displayedPlayerEpisode?.progress || 0;
 
   function nextPlayableEpisode(album: Album) {
     return album.episodes.find((episode) => episode.filePath && (episode.progress || 0) < 100) || album.episodes.find((episode) => episode.filePath) || album.episodes[0];
@@ -123,11 +145,18 @@ export function App() {
 
     setPlayerAlbum(album);
     setPlayerEpisode(episode);
+    setSelectedAlbum((current) => (current?.id === album.id ? album : current));
     const audio = audioRef.current;
     if (!audio) return;
 
     const src = `/media/${encodeURIComponent(album.id)}/${encodeURIComponent(episode.id)}`;
-    if (!audio.src.endsWith(src)) audio.src = src;
+    const absoluteSrc = new URL(src, window.location.href).href;
+    if (audio.src !== absoluteSrc) {
+      audio.src = src;
+      audio.load();
+      setAudioTime(0);
+      setAudioDuration(0);
+    }
     try {
       await audio.play();
       setIsPlaying(true);
@@ -152,6 +181,13 @@ export function App() {
     }
 
     void playAlbum(displayedPlayerAlbum, displayedPlayerEpisode);
+  }
+
+  function seekAudio(nextTime: number) {
+    const audio = audioRef.current;
+    if (!audio || !Number.isFinite(nextTime)) return;
+    audio.currentTime = Math.max(0, Math.min(nextTime, audioDuration || nextTime));
+    setAudioTime(audio.currentTime);
   }
 
   async function handleScan() {
@@ -260,10 +296,18 @@ export function App() {
               onOpen={setSelectedAlbum}
               onPlay={playAlbum}
               selectedAlbum={selectedAlbum}
+              currentAlbum={displayedPlayerAlbum}
+              currentEpisode={displayedPlayerEpisode}
+              audioProgress={audioProgress}
+              audioTime={audioTime}
+              audioDuration={audioDuration}
+              onSeek={seekAudio}
+              isPlaying={isPlaying}
+              onTogglePlay={togglePlay}
             />
           ) : null}
           {view === 'files' ? (
-            <FilesView nas={nas} nasRoot={nasRoot} setNasRoot={setNasRoot} onSave={handleSaveNas} onScan={handleScan} />
+            <FilesView nas={nas} nasRoot={nasRoot} setNasRoot={setNasRoot} onSave={handleSaveNas} onScan={handleScan} onOpen={setSelectedAlbum} />
           ) : null}
           {view === 'search' ? (
             <SearchView query={query} setQuery={(value) => void handleSearch(value)} albums={albums} onOpen={setSelectedAlbum} onPlay={playAlbum} />
@@ -278,6 +322,13 @@ export function App() {
             onCoverChange={handleCoverChange}
             onGenerateCover={handleGenerateCover}
             onPlay={playAlbum}
+            currentEpisodeId={displayedPlayerEpisode?.id}
+            isPlaying={isPlaying}
+            audioTime={audioTime}
+            audioDuration={audioDuration}
+            audioProgress={audioProgress}
+            onTogglePlay={togglePlay}
+            onSeek={seekAudio}
           />
         ) : null}
 
@@ -286,20 +337,26 @@ export function App() {
           <BottomNavButton item={navItems[1]} view={view} setView={setView} />
           <button
             className={isPlaying ? 'nav-player playing' : 'nav-player'}
-            aria-label="打开当前播放项目"
-            onClick={() => {
-              if (displayedPlayerAlbum) setSelectedAlbum(displayedPlayerAlbum);
-            }}
+            aria-label={isPlaying ? '暂停当前播放' : '播放当前项目'}
+            onClick={togglePlay}
           >
             <span className="nav-player-cover" style={{ background: coverBackground(displayedPlayerAlbum?.cover) }} />
             <span className="nav-player-glyph">
-              <Play size={15} fill="currentColor" />
+              {isPlaying ? <Pause size={15} fill="currentColor" /> : <Play size={15} fill="currentColor" />}
             </span>
           </button>
           <BottomNavButton item={navItems[2]} view={view} setView={setView} />
           <BottomNavButton item={navItems[3]} view={view} setView={setView} />
         </nav>
-        <audio ref={audioRef} onPause={() => setIsPlaying(false)} onPlay={() => setIsPlaying(true)} onEnded={() => setIsPlaying(false)} />
+        <audio
+          ref={audioRef}
+          onPause={() => setIsPlaying(false)}
+          onPlay={() => setIsPlaying(true)}
+          onEnded={() => setIsPlaying(false)}
+          onLoadedMetadata={(event) => setAudioDuration(event.currentTarget.duration || 0)}
+          onDurationChange={(event) => setAudioDuration(event.currentTarget.duration || 0)}
+          onTimeUpdate={(event) => setAudioTime(event.currentTarget.currentTime || 0)}
+        />
       </main>
     </div>
   );
@@ -333,7 +390,15 @@ function HomeView({
   isLoading,
   onOpen,
   onPlay,
-  selectedAlbum
+  selectedAlbum,
+  currentAlbum,
+  currentEpisode,
+  audioProgress,
+  audioTime,
+  audioDuration,
+  onSeek,
+  isPlaying,
+  onTogglePlay
 }: {
   albums: Album[];
   activeKind: MediaKind;
@@ -344,10 +409,27 @@ function HomeView({
   onViewChange: (view: AppView) => void;
   isLoading: boolean;
   onOpen: (album: Album) => void;
-  onPlay: (album: Album) => void;
+  onPlay: (album: Album, episode?: Episode) => void;
   selectedAlbum: Album | null;
+  currentAlbum: Album | null;
+  currentEpisode: Episode | null | undefined;
+  audioProgress: number;
+  audioTime: number;
+  audioDuration: number;
+  onSeek: (time: number) => void;
+  isPlaying: boolean;
+  onTogglePlay: () => void;
 }) {
-  const hero = albums.find((album) => album.status === 'listening') || albums[0];
+  const hero = currentAlbum || albums.find((album) => album.status === 'listening') || albums[0];
+  const heroProgress = currentAlbum?.id === hero?.id ? audioProgress : hero?.progress || 0;
+  const isHeroCurrent = Boolean(hero && currentAlbum?.id === hero.id);
+  const heroEpisode =
+    isHeroCurrent && currentEpisode
+      ? currentEpisode
+      : hero?.episodes.find((episode) => (episode.progress || 0) > 0 && (episode.progress || 0) < 100) ||
+        hero?.episodes.find((episode) => (episode.progress || 0) < 100) ||
+        hero?.episodes[0];
+  const heroEpisodeLabel = heroEpisode?.title ? `正在听 ${heroEpisode.title}` : hero?.subtitle || '连接 NAS 后扫描本地音频，就会出现在这里。';
 
   if (isLoading) {
     return <div className="empty-state">正在整理你的私人听书房...</div>;
@@ -355,23 +437,51 @@ function HomeView({
 
   return (
     <>
-      <section className="hero-card" style={{ '--hero-cover': coverBackground(hero?.cover) } as React.CSSProperties}>
+      <section
+        className={hero ? 'hero-card clickable' : 'hero-card'}
+        style={{ '--hero-cover': coverBackground(hero?.cover) } as React.CSSProperties}
+        onClick={() => {
+          if (hero) onOpen(hero);
+        }}
+      >
         <div className="hero-bg" aria-hidden="true" />
         <div>
           <p className="eyebrow">继续听</p>
           <h1>{hero?.title || `还没有${kindLabel(activeKind)}`}</h1>
-          <p>{hero?.subtitle || '连接 NAS 后扫描本地音频，就会出现在这里。'}</p>
+          <p>{heroEpisodeLabel}</p>
           {hero ? (
-            <button className="primary-action" onClick={() => onPlay(hero)}>
-              <Play size={18} fill="currentColor" />
-              继续播放
+            <button
+              className="primary-action"
+              onClick={(event) => {
+                event.stopPropagation();
+                if (isHeroCurrent) {
+                  onTogglePlay();
+                  return;
+                }
+                onPlay(hero);
+              }}
+            >
+              {isHeroCurrent && isPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
+              {isHeroCurrent && isPlaying ? '暂停播放' : '继续播放'}
             </button>
           ) : null}
           {hero ? (
-            <div className="hero-progress">
-              <span style={{ width: `${hero.progress}%` }} />
-              <small>已播放 {hero.progress}%</small>
-            </div>
+            <label className="hero-progress hero-progress-interactive" aria-label="首页播放进度">
+              <span style={{ width: `${heroProgress}%` }} />
+              <input
+                type="range"
+                min="0"
+                max={audioDuration || 0}
+                step="1"
+                value={audioDuration ? audioTime : 0}
+                disabled={!audioDuration || currentAlbum?.id !== hero.id}
+                onClick={(event) => event.stopPropagation()}
+                onChange={(event) => onSeek(Number(event.currentTarget.value))}
+              />
+              <small>
+                已播放 {heroProgress}% {audioDuration ? `· ${formatClock(audioTime)} / ${formatClock(audioDuration)}` : ''}
+              </small>
+            </label>
           ) : null}
         </div>
         <div className="hero-cover" style={{ background: coverBackground(hero?.cover) }} aria-hidden="true" />
@@ -409,7 +519,15 @@ function HomeView({
   );
 }
 
-function DramaListRow({ album, onOpen, onPlay }: { album: Album; onOpen: (album: Album) => void; onPlay: (album: Album) => void }) {
+function DramaListRow({
+  album,
+  onOpen,
+  onPlay
+}: {
+  album: Album;
+  onOpen: (album: Album) => void;
+  onPlay: (album: Album, episode?: Episode) => void;
+}) {
   const nextEpisode = album.episodes.find((episode) => (episode.progress || 0) < 100) || album.episodes[0];
   const lastIndex = nextEpisode ? Math.max(1, album.episodes.findIndex((episode) => episode.id === nextEpisode.id) + 1) : 1;
 
@@ -419,7 +537,7 @@ function DramaListRow({ album, onOpen, onPlay }: { album: Album; onOpen: (album:
         <span className="drama-row-cover" style={{ background: coverBackground(album.cover) }} />
         <span className="drama-row-copy">
           <strong>{album.title}</strong>
-          <small>第一季 · 共 {album.totalEpisodes} 集</small>
+          <small>{album.subtitle}</small>
           <em>
             已播放 <b>{album.progress}%</b> · 上次听到 <b>第 {String(lastIndex).padStart(2, '0')} 集</b>
           </em>
@@ -642,19 +760,76 @@ function AlbumCard({ album, active, onOpen }: { album: Album; active?: boolean; 
   );
 }
 
+function seriesTitleForAlbum(title: string) {
+  return title
+    .replace(/\s+第[一二三四五六七八九十两\d]+季(?:（[上下]）)?$/u, '')
+    .replace(/\s+第[一二三四五六七八九十两\d]+季(?:[上下])?$/u, '')
+    .trim();
+}
+
+type DramaSeries = {
+  id: string;
+  title: string;
+  albums: Album[];
+  totalEpisodes: number;
+};
+
+function groupDramaSeries(albums: Album[]): DramaSeries[] {
+  const groups = new Map<string, DramaSeries>();
+  for (const album of albums.filter((item) => item.kind === 'drama')) {
+    const title = seriesTitleForAlbum(album.title) || album.title;
+    const group = groups.get(title) || { id: title, title, albums: [], totalEpisodes: 0 };
+    group.albums.push(album);
+    group.totalEpisodes += album.totalEpisodes;
+    groups.set(title, group);
+  }
+
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      albums: [...group.albums].sort((a, b) => a.title.localeCompare(b.title, 'zh-Hans-CN', { numeric: true, sensitivity: 'base' }))
+    }))
+    .sort((a, b) => a.title.localeCompare(b.title, 'zh-Hans-CN', { numeric: true, sensitivity: 'base' }));
+}
+
 function FilesView({
   nas,
   nasRoot,
   setNasRoot,
   onSave,
-  onScan
+  onScan,
+  onOpen
 }: {
   nas: NasConfig | null;
   nasRoot: string;
   setNasRoot: (value: string) => void;
   onSave: () => void;
   onScan: () => void;
+  onOpen: (album: Album) => void;
 }) {
+  const [dramaAlbums, setDramaAlbums] = useState<Album[]>([]);
+  const [isLoadingDrama, setIsLoadingDrama] = useState(false);
+
+  async function loadDramaWall() {
+    setIsLoadingDrama(true);
+    try {
+      setDramaAlbums(await fetchAlbums('drama'));
+    } finally {
+      setIsLoadingDrama(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadDramaWall();
+  }, []);
+
+  async function scanAndRefresh() {
+    await onScan();
+    await loadDramaWall();
+  }
+
+  const series = groupDramaSeries(dramaAlbums);
+
   return (
     <section className="panel-page">
       <SectionHeader title="NAS 文件" subtitle="先支持本地挂载路径，后续可扩展 SMB/WebDAV 登录" />
@@ -663,24 +838,36 @@ function FilesView({
         <input id="nas-root" value={nasRoot} onChange={(event) => setNasRoot(event.target.value)} placeholder="/Volumes/你的NAS/广播剧" />
         <div className="button-row">
           <button onClick={onSave}>保存路径</button>
-          <button className="filled" onClick={onScan}>
+          <button className="filled" onClick={() => void scanAndRefresh()}>
             扫描音频
           </button>
         </div>
         <p>{nas?.connected ? `已连接：${nas.root}` : '当前未连接。可以先把 NAS 挂载到本机，再填入路径。'}</p>
       </div>
 
-      <div className="file-hints">
-        <div>
-          <FolderOpen size={22} />
-          <strong>目录即专辑</strong>
-          <span>每个文件夹会自动整理成一个广播剧、有声书或网课专辑。</span>
-        </div>
-        <div>
-          <Library size={22} />
-          <strong>本地索引</strong>
-          <span>搜索只查本地数据库，不连接外部平台。</span>
-        </div>
+      <SectionHeader title="广播剧系列墙" subtitle={isLoadingDrama ? '正在整理...' : `${series.length} 个系列`} />
+      <div className="series-wall">
+        {series.map((item) => (
+          <button key={item.id} className="series-card" onClick={() => onOpen(item.albums[0])}>
+            <span className="series-cover-stack" aria-hidden="true">
+              {item.albums.slice(0, 4).map((album, index) => (
+                <i
+                  key={album.id}
+                  style={
+                    {
+                      '--series-cover': coverBackground(album.cover),
+                      '--series-index': index
+                    } as React.CSSProperties
+                  }
+                />
+              ))}
+            </span>
+            <span className="series-title">{item.title}</span>
+            <span className="series-meta">
+              {item.albums.length} 季 · {item.totalEpisodes} 集
+            </span>
+          </button>
+        ))}
       </div>
     </section>
   );
@@ -697,7 +884,7 @@ function SearchView({
   setQuery: (value: string) => void;
   albums: Album[];
   onOpen: (album: Album) => void;
-  onPlay: (album: Album) => void;
+  onPlay: (album: Album, episode?: Episode) => void;
 }) {
   return (
     <section className="panel-page">
@@ -738,6 +925,14 @@ function MeView({
   onAddCategory: (name: string) => Promise<void>;
 }) {
   const [categoryName, setCategoryName] = useState('');
+  const [avatar, setAvatar] = useState('');
+  const [isSavingAvatar, setIsSavingAvatar] = useState(false);
+
+  useEffect(() => {
+    fetchProfile()
+      .then((profile) => setAvatar(profile.avatar || ''))
+      .catch(() => setAvatar(''));
+  }, []);
 
   async function submitCategory(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -745,6 +940,26 @@ function MeView({
     if (!name) return;
     await onAddCategory(name);
     setCategoryName('');
+  }
+
+  async function handleAvatarChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) return;
+
+    const reader = new FileReader();
+    reader.onload = async () => {
+      if (typeof reader.result !== 'string') return;
+      setIsSavingAvatar(true);
+      try {
+        const profile = await updateProfileAvatar(reader.result);
+        setAvatar(profile.avatar);
+      } finally {
+        setIsSavingAvatar(false);
+        event.target.value = '';
+      }
+    };
+    reader.readAsDataURL(file);
   }
 
   const myTools: Array<{ icon: SketchIconName; label: string; note: string }> = [
@@ -772,7 +987,11 @@ function MeView({
 
       <div className="me-profile-card">
         <div className="me-profile-main">
-          <div className="me-avatar">听</div>
+          <label className={avatar ? 'me-avatar has-image' : 'me-avatar'} aria-label="更换头像">
+            <input type="file" accept="image/*" onChange={handleAvatarChange} />
+            {avatar ? <img src={avatar} alt="头像" /> : <span>听</span>}
+            <em>{isSavingAvatar ? '保存中' : '更换'}</em>
+          </label>
           <div>
             <h1>私人听书房</h1>
             <p>{nas?.connected ? 'NAS 已连接' : '等待连接 NAS'}</p>
@@ -830,17 +1049,41 @@ function AlbumDrawer({
   onClose,
   onCoverChange,
   onGenerateCover,
-  onPlay
+  onPlay,
+  currentEpisodeId,
+  isPlaying,
+  audioTime,
+  audioDuration,
+  audioProgress,
+  onTogglePlay,
+  onSeek
 }: {
   album: Album;
   onClose: () => void;
   onCoverChange: (albumId: string, cover: string) => Promise<void>;
   onGenerateCover: (albumId: string) => Promise<void>;
-  onPlay: (album: Album) => void;
+  onPlay: (album: Album, episode?: Episode) => void;
+  currentEpisodeId?: string;
+  isPlaying: boolean;
+  audioTime: number;
+  audioDuration: number;
+  audioProgress: number;
+  onTogglePlay: () => void;
+  onSeek: (time: number) => void;
 }) {
   const [isSavingCover, setIsSavingCover] = useState(false);
   const [isGeneratingCover, setIsGeneratingCover] = useState(false);
-  const activeEpisode = album.episodes.find((episode) => (episode.progress || 0) < 100) || album.episodes[0];
+  const [activeTab, setActiveTab] = useState<'summary' | 'episodes' | 'files'>('summary');
+  const activeEpisode =
+    album.episodes.find((episode) => episode.id === currentEpisodeId) ||
+    album.episodes.find((episode) => (episode.progress || 0) < 100) ||
+    album.episodes[0];
+  const activeEpisodeIndex = Math.max(
+    0,
+    album.episodes.findIndex((episode) => episode.id === activeEpisode?.id)
+  );
+  const previousEpisode = album.episodes.slice(0, activeEpisodeIndex).reverse().find((episode) => episode.filePath);
+  const nextEpisode = album.episodes.slice(activeEpisodeIndex + 1).find((episode) => episode.filePath);
 
   async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -910,72 +1153,120 @@ function AlbumDrawer({
           </div>
 
           <div className="player-progress">
-            <div className="progress-line">
-              <span style={{ width: `${album.progress}%` }} />
-            </div>
+            <label className="progress-line progress-line-interactive" aria-label="播放进度">
+              <span style={{ width: `${audioProgress}%` }} />
+              <input
+                type="range"
+                min="0"
+                max={audioDuration || 0}
+                step="1"
+                value={audioDuration ? audioTime : 0}
+                disabled={!audioDuration}
+                onChange={(event) => onSeek(Number(event.currentTarget.value))}
+              />
+            </label>
             <div>
-              <small>{activeEpisode?.progress ? `${activeEpisode.progress}%` : '00:02'}</small>
-              <small>{activeEpisode?.duration || '00:00'}</small>
+              <small>{formatClock(audioTime)}</small>
+              <small>{audioDuration ? formatClock(audioDuration) : activeEpisode?.duration || '00:00'}</small>
             </div>
           </div>
 
           <div className="transport-controls">
-            <button aria-label="后退 15 秒">15s</button>
-            <button aria-label="上一集">
+            <button aria-label="后退 15 秒" onClick={() => onSeek(audioTime - 15)}>
+              15s
+            </button>
+            <button aria-label="上一集" disabled={!previousEpisode} onClick={() => previousEpisode && onPlay(album, previousEpisode)}>
               <SkipBack size={30} fill="currentColor" />
             </button>
-            <button className="transport-play" onClick={() => onPlay(album)} aria-label="播放">
-              <Play size={34} fill="currentColor" />
+            <button className={isPlaying ? 'transport-play playing' : 'transport-play'} onClick={onTogglePlay} aria-label={isPlaying ? '暂停' : '播放'}>
+              {isPlaying ? <Pause size={34} fill="currentColor" /> : <Play size={34} fill="currentColor" />}
             </button>
-            <button aria-label="下一集">
+            <button aria-label="下一集" disabled={!nextEpisode} onClick={() => nextEpisode && onPlay(album, nextEpisode)}>
               <SkipForward size={30} fill="currentColor" />
             </button>
-            <button aria-label="播放列表">
+            <button aria-label="播放列表" onClick={() => setActiveTab('episodes')}>
               <ListMusic size={32} />
             </button>
           </div>
 
           <div className="player-tabs">
-            <button className="active">简介</button>
-            <button>分集</button>
-            <button>文件</button>
+            <button className={activeTab === 'summary' ? 'active' : ''} onClick={() => setActiveTab('summary')}>
+              简介
+            </button>
+            <button className={activeTab === 'episodes' ? 'active' : ''} onClick={() => setActiveTab('episodes')}>
+              分集
+            </button>
+            <button className={activeTab === 'files' ? 'active' : ''} onClick={() => setActiveTab('files')}>
+              文件
+            </button>
           </div>
 
-          <div className="player-summary">
-            <span className="kind-badge">{kindLabel(album.kind)}</span>
-            <p>{album.description}</p>
-            <div className="cover-tools">
-              <label className="cover-upload">
-                <input type="file" accept="image/*" onChange={handleFileChange} />
-                {isSavingCover ? '保存中...' : '更换封面'}
-              </label>
-              <button
-                className="cover-generate"
-                disabled={isGeneratingCover}
-                onClick={async () => {
-                  setIsGeneratingCover(true);
-                  try {
-                    await onGenerateCover(album.id);
-                  } finally {
-                    setIsGeneratingCover(false);
-                  }
-                }}
-              >
-                {isGeneratingCover ? '生成中...' : 'AI 封面'}
-              </button>
+          {activeTab === 'summary' ? (
+            <div className="player-summary">
+              <span className="kind-badge">{kindLabel(album.kind)}</span>
+              <p>{album.description}</p>
+              <div className="cover-tools">
+                <label className="cover-upload">
+                  <input type="file" accept="image/*" onChange={handleFileChange} />
+                  {isSavingCover ? '保存中...' : '更换封面'}
+                </label>
+                <button
+                  className="cover-generate"
+                  disabled={isGeneratingCover}
+                  onClick={async () => {
+                    setIsGeneratingCover(true);
+                    try {
+                      await onGenerateCover(album.id);
+                    } finally {
+                      setIsGeneratingCover(false);
+                    }
+                  }}
+                >
+                  {isGeneratingCover ? '生成中...' : 'AI 封面'}
+                </button>
+              </div>
             </div>
-          </div>
+          ) : null}
 
-          <SectionHeader title="分集" subtitle={`${album.totalEpisodes} 集 · ${album.progress}%`} />
-          <div className="episode-list player-episode-list">
-            {album.episodes.map((episode, index) => (
-              <button key={episode.id}>
-                <span>{String(index + 1).padStart(2, '0')}</span>
-                <strong>{episode.title}</strong>
-                <small>{episode.duration}</small>
-              </button>
-            ))}
-          </div>
+          {activeTab === 'episodes' ? (
+            <>
+              <SectionHeader title="分集" subtitle={`${album.totalEpisodes} 集 · ${audioProgress}%`} />
+              <div className="episode-list player-episode-list">
+                {album.episodes.map((episode, index) => (
+                  <button
+                    key={episode.id}
+                    className={episode.id === activeEpisode?.id ? 'active' : ''}
+                    onClick={() => onPlay(album, episode)}
+                    disabled={!episode.filePath}
+                  >
+                    <span>{String(index + 1).padStart(2, '0')}</span>
+                    <strong>{episode.title}</strong>
+                    <small>{episode.duration}</small>
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : null}
+
+          {activeTab === 'files' ? (
+            <>
+              <SectionHeader title="文件" subtitle="NAS 本地路径" />
+              <div className="episode-list player-episode-list file-path-list">
+                {album.episodes.map((episode, index) => (
+                  <button
+                    key={episode.id}
+                    className={episode.id === activeEpisode?.id ? 'active' : ''}
+                    onClick={() => onPlay(album, episode)}
+                    disabled={!episode.filePath}
+                  >
+                    <span>{String(index + 1).padStart(2, '0')}</span>
+                    <strong>{episode.title}</strong>
+                    <small>{episode.filePath?.split('/').pop() || '无文件'}</small>
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : null}
         </div>
       </div>
     </section>

@@ -30,6 +30,10 @@ export type Category = {
   name: string;
 };
 
+export type UserProfile = {
+  avatar: string;
+};
+
 export type NasConfig = {
   type: 'local' | 'smb' | 'webdav';
   label: string;
