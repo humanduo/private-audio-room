@@ -1,4 +1,4 @@
-import type { Album, Category, MediaKind, NasConfig, UserProfile } from './types';
+import type { Album, AlbumRecommendation, Category, FavoriteFolder, MediaKind, NasConfig, UserProfile } from './types';
 
 const jsonHeaders = { 'Content-Type': 'application/json' };
 
@@ -29,6 +29,45 @@ export async function createCategory(name: string): Promise<Category[]> {
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || '分类保存失败');
   return data.categories;
+}
+
+export async function fetchFavoriteFolders(): Promise<FavoriteFolder[]> {
+  const response = await fetch('/api/favorite-folders');
+  if (!response.ok) throw new Error('收藏夹加载失败');
+  const data = await response.json();
+  return data.favoriteFolders;
+}
+
+export async function fetchAlbumRecommendations(albumId: string): Promise<AlbumRecommendation[]> {
+  const response = await fetch(`/api/albums/${albumId}/recommendations?limit=6`);
+  if (!response.ok) throw new Error('相关推荐加载失败');
+  const data = await response.json();
+  return data.recommendations;
+}
+
+export async function createFavoriteFolder(name: string): Promise<FavoriteFolder[]> {
+  const response = await fetch('/api/favorite-folders', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ name })
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || '收藏夹创建失败');
+  return data.favoriteFolders;
+}
+
+export async function addAlbumToFavoriteFolder(folderId: string, albumId: string): Promise<FavoriteFolder[]> {
+  const response = await fetch(`/api/favorite-folders/${folderId}/albums/${albumId}`, { method: 'POST' });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || '收藏失败');
+  return data.favoriteFolders;
+}
+
+export async function removeAlbumFromFavoriteFolder(folderId: string, albumId: string): Promise<FavoriteFolder[]> {
+  const response = await fetch(`/api/favorite-folders/${folderId}/albums/${albumId}`, { method: 'DELETE' });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || '取消收藏失败');
+  return data.favoriteFolders;
 }
 
 export async function fetchProfile(): Promise<UserProfile> {
@@ -83,6 +122,37 @@ export async function updateAlbumCover(albumId: string, cover: string): Promise<
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || '封面保存失败');
   return data.album;
+}
+
+export async function updateAlbumMetadata(albumId: string, metadata: Partial<Album>): Promise<Album> {
+  const response = await fetch(`/api/albums/${albumId}/metadata`, {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify(metadata)
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || '资料保存失败');
+  return data.album;
+}
+
+export async function analyzeAlbumMetadata(
+  albumId: string
+): Promise<{ metadata: Partial<Album> & { confidence?: number; needsReview?: boolean }; album: Album }> {
+  const response = await fetch(`/api/albums/${albumId}/metadata/analyze`, { method: 'POST' });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'DeepSeek 资料整理失败');
+  return { metadata: data.metadata, album: data.album };
+}
+
+export async function analyzeLibraryMetadata(): Promise<{ albums: Album[]; total: number; updated: number; failed: number }> {
+  const response = await fetch('/api/metadata/analyze-batch', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ kind: 'drama', mode: 'all', limit: 50 })
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'DeepSeek 全库整理失败');
+  return data;
 }
 
 export async function generateAlbumCover(albumId: string): Promise<Album> {

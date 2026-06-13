@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultCategories, defaultNasConfig, mockAlbums } from './mockData';
-import type { Album, AppConfig, Category, MediaKind, NasConfig, UserProfile } from './types';
+import type { Album, AlbumRecommendation, AppConfig, Category, FavoriteFolder, MediaKind, NasConfig, UserProfile } from './types';
 
 const app = express();
 const port = Number(process.env.PORT || 8787);
@@ -21,7 +21,18 @@ const coversDir = path.resolve('data/covers');
 app.use(cors());
 app.use(express.json());
 
-type AppState = { nas: NasConfig; albums: Album[]; categories: Category[]; profile: UserProfile };
+type AppState = { nas: NasConfig; albums: Album[]; categories: Category[]; favoriteFolders: FavoriteFolder[]; profile: UserProfile };
+type AiMetadata = {
+  author: string;
+  cast: string[];
+  summary: string;
+  genres: string[];
+  relationship: string;
+  audience: string;
+  finishStatus: string;
+  confidence: number;
+  needsReview: boolean;
+};
 
 function normalizeState(state: Partial<AppState>): AppState {
   const defaultAlbumMap = new Map(mockAlbums.map((album) => [album.id, album]));
@@ -35,7 +46,9 @@ function normalizeState(state: Partial<AppState>): AppState {
       ...defaultAlbum,
       ...album,
       cover: hasCustomCover ? album.cover : defaultAlbum.cover,
-      tags: [...new Set([...(defaultAlbum.tags || []), ...(album.tags || [])])]
+      tags: uniqueStrings([...(defaultAlbum.tags || []), ...(album.tags || [])]),
+      cast: uniqueStrings(album.cast || defaultAlbum.cast || []),
+      genres: uniqueStrings(album.genres || defaultAlbum.genres || [])
     };
   });
 
@@ -43,13 +56,20 @@ function normalizeState(state: Partial<AppState>): AppState {
     nas: state.nas || defaultNasConfig,
     albums,
     categories: state.categories?.length ? state.categories : defaultCategories,
+    favoriteFolders: normalizeFavoriteFolders(state.favoriteFolders),
     profile: state.profile || { avatar: '' }
   };
 }
 
 function readState(): AppState {
   if (!fs.existsSync(stateFile)) {
-    return { nas: defaultNasConfig, albums: mockAlbums, categories: defaultCategories, profile: { avatar: '' } };
+    return {
+      nas: defaultNasConfig,
+      albums: mockAlbums,
+      categories: defaultCategories,
+      favoriteFolders: normalizeFavoriteFolders([]),
+      profile: { avatar: '' }
+    };
   }
 
   const raw = fs.readFileSync(stateFile, 'utf-8');
@@ -59,6 +79,36 @@ function readState(): AppState {
 function writeState(state: AppState) {
   fs.mkdirSync(path.dirname(stateFile), { recursive: true });
   fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function normalizeFavoriteFolders(folders?: FavoriteFolder[]) {
+  const now = nowIso();
+  const normalized = (folders || []).map((folder) => ({
+    id: folder.id || `fav-${stableId(folder.name || now)}`,
+    name: stringField(folder.name, 40) || '默认收藏夹',
+    albumIds: uniqueStrings(folder.albumIds || []),
+    createdAt: folder.createdAt || now,
+    updatedAt: folder.updatedAt || now
+  }));
+
+  if (!normalized.some((folder) => folder.id === 'default')) {
+    return [
+      {
+        id: 'default',
+        name: '默认收藏夹',
+        albumIds: [],
+        createdAt: now,
+        updatedAt: now
+      },
+      ...normalized
+    ];
+  }
+
+  return normalized;
 }
 
 function getConfig(): AppConfig {
@@ -81,6 +131,241 @@ function inferKindFromPath(filePath: string): MediaKind {
   if (normalized.includes('课程') || normalized.includes('course') || normalized.includes('课')) return 'course';
   if (normalized.includes('book') || normalized.includes('有声书') || normalized.includes('听书')) return 'book';
   return 'drama';
+}
+
+function uniqueStrings(values: unknown[]) {
+  return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
+}
+
+function stringField(value: unknown, maxLength = 600) {
+  return String(value || '').trim().slice(0, maxLength);
+}
+
+function arrayField(value: unknown, maxItems = 12) {
+  if (Array.isArray(value)) return uniqueStrings(value).slice(0, maxItems);
+  return uniqueStrings(String(value || '').split(/[，,、\n]/)).slice(0, maxItems);
+}
+
+function metadataPatchFromBody(body: Record<string, unknown>) {
+  return {
+    author: stringField(body.author, 80),
+    cast: arrayField(body.cast, 20),
+    summary: stringField(body.summary, 1200),
+    genres: arrayField(body.genres, 16),
+    relationship: stringField(body.relationship, 30),
+    audience: stringField(body.audience, 30),
+    finishStatus: stringField(body.finishStatus, 30),
+    tags: arrayField(body.tags, 24),
+    description: stringField(body.description, 1200)
+  };
+}
+
+function aiMetadataFromBody(body: Record<string, unknown>): AiMetadata {
+  return {
+    author: stringField(body.author, 80),
+    cast: arrayField(body.cast, 20),
+    summary: stringField(body.summary || body.shortSummary, 1200),
+    genres: arrayField(body.genres, 16),
+    relationship: stringField(body.relationship, 30),
+    audience: stringField(body.audience, 30),
+    finishStatus: stringField(body.finishStatus, 30),
+    confidence: Math.max(0, Math.min(1, Number(body.confidence || 0))),
+    needsReview: body.needsReview !== false
+  };
+}
+
+function extractJsonObject(text: string) {
+  const cleaned = text
+    .replace(/^```(?:json)?/i, '')
+    .replace(/```$/i, '')
+    .trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error('DeepSeek did not return JSON');
+    return JSON.parse(match[0]);
+  }
+}
+
+async function analyzeAlbumMetadataWithDeepSeek(album: Album) {
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  if (!apiKey) throw new Error('DEEPSEEK_API_KEY is not configured');
+
+  const model = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
+  const baseUrl = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/chat/completions';
+  const episodeTitles = album.episodes.slice(0, 40).map((episode, index) => `${index + 1}. ${episode.title}`).join('\n');
+  const prompt = [
+    '你是一个私人 NAS 广播剧资料整理助手。请根据本地文件信息推断广播剧元数据。',
+    '不要联网，不要编造确定信息；不确定时留空或降低 confidence，并设置 needsReview=true。',
+    '只返回 JSON，不要 Markdown，不要解释。',
+    '',
+    '允许的 relationship：言情、耽美、百合、无 CP、群像、空字符串。',
+    '允许的 audience：男女、男男、女女、群像、空字符串。',
+    '允许的 finishStatus：已完结、连载中、未知。',
+    'genres 用短标签，例如：现代、古风、悬疑、恐怖、刑侦、甜宠、虐恋、权谋、无限流、校园、娱乐圈、修仙、治愈、强强。',
+    '',
+    `标题：${album.title}`,
+    `副标题：${album.subtitle}`,
+    `当前作者/创建者：${album.author || album.creator || ''}`,
+    `当前标签：${[...(album.tags || []), ...(album.genres || [])].join('、')}`,
+    `当前简介：${album.summary || album.description || ''}`,
+    `总集数：${album.totalEpisodes}`,
+    `分集标题：\n${episodeTitles}`,
+    '',
+    '返回格式：',
+    '{"author":"","cast":[],"summary":"","genres":[],"relationship":"","audience":"","finishStatus":"未知","confidence":0.5,"needsReview":true}'
+  ].join('\n');
+
+  const response = await fetch(baseUrl, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.2,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: '你负责把广播剧资料整理成严格 JSON。' },
+        { role: 'user', content: prompt }
+      ]
+    })
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = data?.error?.message || data?.message || 'DeepSeek metadata analysis failed';
+    throw new Error(message);
+  }
+
+  const content = data?.choices?.[0]?.message?.content;
+  if (!content) throw new Error('DeepSeek returned empty metadata');
+  return aiMetadataFromBody(extractJsonObject(content));
+}
+
+function applyAiMetadataToAlbum(album: Album, metadata: AiMetadata): Album {
+  const nextTags = uniqueStrings([...(album.tags || []), ...(metadata.genres || [])]);
+  return {
+    ...album,
+    author: metadata.author || album.author,
+    cast: metadata.cast.length ? metadata.cast : album.cast,
+    summary: metadata.summary || album.summary,
+    description: metadata.summary || album.description,
+    genres: metadata.genres.length ? metadata.genres : album.genres,
+    relationship: metadata.relationship || album.relationship,
+    audience: metadata.audience || album.audience,
+    finishStatus: metadata.finishStatus || album.finishStatus,
+    tags: nextTags.length ? nextTags : album.tags,
+    updatedAt: '刚刚整理',
+    aiMetaStatus: 'saved',
+    aiMetaUpdatedAt: new Date().toISOString()
+  };
+}
+
+const genericRecommendationTerms = new Set(['nas', '本地', '广播剧', '有声书', '网课', '课程', '听书', '未知']);
+
+function comparableTerms(values: Array<string | undefined>) {
+  return uniqueStrings(values).filter((value) => !genericRecommendationTerms.has(value.toLowerCase()));
+}
+
+function sharedTerms(source: Array<string | undefined>, target: Array<string | undefined>) {
+  const targetSet = new Set(comparableTerms(target));
+  return comparableTerms(source).filter((value) => targetSet.has(value));
+}
+
+function addRecommendationReason(reasons: string[], reason: string) {
+  if (reason && !reasons.includes(reason)) reasons.push(reason);
+}
+
+function scoreAlbumRecommendation(source: Album, candidate: Album): AlbumRecommendation | null {
+  if (source.id === candidate.id) return null;
+
+  let score = 0;
+  const reasons: string[] = [];
+
+  if (source.author && candidate.author && source.author === candidate.author) {
+    score += 5;
+    addRecommendationReason(reasons, `同作者：${source.author}`);
+  }
+
+  const sharedCast = sharedTerms(source.cast || [], candidate.cast || []);
+  if (sharedCast.length) {
+    score += Math.min(sharedCast.length, 3) * 3;
+    addRecommendationReason(reasons, `同配音：${sharedCast.slice(0, 2).join('、')}`);
+  }
+
+  if (source.relationship && candidate.relationship && source.relationship === candidate.relationship) {
+    score += 3;
+    addRecommendationReason(reasons, source.relationship);
+  }
+
+  if (source.audience && candidate.audience && source.audience === candidate.audience) {
+    score += 2;
+    addRecommendationReason(reasons, source.audience);
+  }
+
+  const sharedGenres = sharedTerms([...(source.genres || []), ...(source.tags || [])], [...(candidate.genres || []), ...(candidate.tags || [])]);
+  if (sharedGenres.length) {
+    score += Math.min(sharedGenres.length, 4) * 2;
+    addRecommendationReason(reasons, sharedGenres.slice(0, 3).join('、'));
+  }
+
+  if (source.finishStatus && candidate.finishStatus && source.finishStatus === candidate.finishStatus && source.finishStatus !== '未知') {
+    score += 1;
+    addRecommendationReason(reasons, source.finishStatus);
+  }
+
+  if (score <= 0 && source.kind === candidate.kind) {
+    score = 1;
+    addRecommendationReason(reasons, `同为${kindLabel(source.kind)}`);
+  }
+
+  if (score <= 0) return null;
+  return { album: candidate, score, reasons };
+}
+
+function kindLabel(kind: MediaKind) {
+  if (kind === 'book') return '有声书';
+  if (kind === 'course') return '网课';
+  return '广播剧';
+}
+
+function getAlbumRecommendations(album: Album, albums: Album[], limit = 6) {
+  return albums
+    .map((candidate) => scoreAlbumRecommendation(album, candidate))
+    .filter((recommendation): recommendation is AlbumRecommendation => Boolean(recommendation))
+    .sort((a, b) => b.score - a.score || b.album.progress - a.album.progress || a.album.title.localeCompare(b.album.title, 'zh-Hans-CN'))
+    .slice(0, limit);
+}
+
+function mergeManualMetadata(scanned: Album[], existing: Album[]) {
+  const existingById = new Map(existing.map((album) => [album.id, album]));
+  const existingByTitle = new Map(existing.map((album) => [album.title, album]));
+  return scanned.map((album) => {
+    const previous = existingById.get(album.id) || existingByTitle.get(album.title);
+    if (!previous) return album;
+    const hasCustomCover =
+      previous.cover?.startsWith('data:image/') || previous.cover?.startsWith('/covers/') || previous.cover?.startsWith('/assets/');
+    return {
+      ...album,
+      cover: hasCustomCover ? previous.cover : album.cover,
+      status: previous.status || album.status,
+      progress: previous.progress || album.progress,
+      tags: uniqueStrings([...(album.tags || []), ...(previous.tags || []), ...(previous.genres || [])]),
+      description: previous.description && previous.description !== `来自 NAS 目录：${album.title}` ? previous.description : album.description,
+      author: previous.author || album.author,
+      cast: uniqueStrings(previous.cast || album.cast || []),
+      summary: previous.summary || album.summary,
+      genres: uniqueStrings(previous.genres || album.genres || []),
+      relationship: previous.relationship || album.relationship,
+      audience: previous.audience || album.audience,
+      finishStatus: previous.finishStatus || album.finishStatus,
+      aiMetaStatus: previous.aiMetaStatus || album.aiMetaStatus,
+      aiMetaUpdatedAt: previous.aiMetaUpdatedAt || album.aiMetaUpdatedAt
+    };
+  });
 }
 
 function isPathInsideRoot(filePath: string, root: string) {
@@ -500,6 +785,15 @@ function albumsFromFiles(root: string, files: string[]): Album[] {
       updatedAt: '刚刚扫描',
       tags: ['NAS', kind === 'drama' ? '广播剧' : kind === 'book' ? '有声书' : '网课'],
       description: `来自 NAS 目录：${group}`,
+      author: '',
+      cast: [],
+      summary: '',
+      genres: [],
+      relationship: '',
+      audience: '',
+      finishStatus: '',
+      aiMetaStatus: 'none',
+      aiMetaUpdatedAt: '',
       episodes: sortedFiles.map((file, fileIndex) => ({
         id: `ep-${stableId(path.relative(root, file), 24)}`,
         title: cleanEpisodeTitle(file, title, fileIndex),
@@ -528,14 +822,27 @@ app.get('/api/albums', (req, res) => {
   if (kind) albums = albums.filter((album) => album.kind === kind);
   if (query) {
     albums = albums.filter((album) => {
-      return [album.title, album.subtitle, album.creator, album.description, ...album.tags].some((value) =>
+      return [
+        album.title,
+        album.subtitle,
+        album.creator,
+        album.description,
+        album.author || '',
+        album.summary || '',
+        album.relationship || '',
+        album.audience || '',
+        album.finishStatus || '',
+        ...(album.cast || []),
+        ...(album.genres || []),
+        ...album.tags
+      ].some((value) =>
         value.toLowerCase().includes(query)
       );
     });
   }
 
   const category = String(req.query.category || '').trim();
-  if (category) albums = albums.filter((album) => album.tags.includes(category));
+  if (category) albums = albums.filter((album) => [...album.tags, ...(album.genres || [])].includes(category));
 
   res.json({ albums });
 });
@@ -544,6 +851,14 @@ app.get('/api/albums/:id', (req, res) => {
   const album = readState().albums.find((item) => item.id === req.params.id);
   if (!album) return res.status(404).json({ error: 'Album not found' });
   res.json({ album });
+});
+
+app.get('/api/albums/:id/recommendations', (req, res) => {
+  const limit = Math.max(1, Math.min(12, Number(req.query.limit || 6)));
+  const state = readState();
+  const album = state.albums.find((item) => item.id === req.params.id);
+  if (!album) return res.status(404).json({ error: 'Album not found' });
+  res.json({ recommendations: getAlbumRecommendations(album, state.albums, limit) });
 });
 
 app.patch('/api/albums/:id/cover', (req, res) => {
@@ -565,6 +880,90 @@ app.patch('/api/albums/:id/cover', (req, res) => {
   state.albums[albumIndex] = { ...state.albums[albumIndex], cover };
   writeState(state);
   res.json({ album: state.albums[albumIndex] });
+});
+
+app.patch('/api/albums/:id/metadata', (req, res) => {
+  const state = readState();
+  const albumIndex = state.albums.findIndex((item) => item.id === req.params.id);
+  if (albumIndex < 0) return res.status(404).json({ error: 'Album not found' });
+
+  const patch = metadataPatchFromBody(req.body || {});
+  const nextTags = uniqueStrings([...patch.tags, ...patch.genres]);
+  state.albums[albumIndex] = {
+    ...state.albums[albumIndex],
+    ...patch,
+    tags: nextTags.length ? nextTags : state.albums[albumIndex].tags,
+    aiMetaStatus: state.albums[albumIndex].aiMetaStatus === 'suggested' ? 'saved' : state.albums[albumIndex].aiMetaStatus,
+    updatedAt: '刚刚整理'
+  };
+  writeState(state);
+  res.json({ album: state.albums[albumIndex] });
+});
+
+app.post('/api/albums/:id/metadata/analyze', async (req, res) => {
+  const state = readState();
+  const albumIndex = state.albums.findIndex((item) => item.id === req.params.id);
+  if (albumIndex < 0) return res.status(404).json({ error: 'Album not found' });
+
+  try {
+    const metadata = await analyzeAlbumMetadataWithDeepSeek(state.albums[albumIndex]);
+    state.albums[albumIndex] = applyAiMetadataToAlbum(state.albums[albumIndex], metadata);
+    writeState(state);
+    res.json({ metadata, album: state.albums[albumIndex] });
+  } catch (error) {
+    state.albums[albumIndex] = {
+      ...state.albums[albumIndex],
+      aiMetaStatus: 'failed',
+      aiMetaUpdatedAt: new Date().toISOString()
+    };
+    writeState(state);
+    res.status(502).json({ error: error instanceof Error ? error.message : 'DeepSeek metadata analysis failed' });
+  }
+});
+
+app.post('/api/metadata/analyze-batch', async (req, res) => {
+  if (!process.env.DEEPSEEK_API_KEY) {
+    return res.status(400).json({ error: 'DEEPSEEK_API_KEY is not configured' });
+  }
+
+  const kind = (req.body?.kind || 'drama') as MediaKind;
+  const mode = String(req.body?.mode || 'all');
+  const limit = Math.max(1, Math.min(200, Number(req.body?.limit || process.env.AI_METADATA_BATCH_LIMIT || 50)));
+  const state = readState();
+  const candidates = state.albums
+    .map((album, index) => ({ album, index }))
+    .filter(({ album }) => album.kind === kind)
+    .filter(({ album }) => {
+      if (mode === 'failed-only') return album.aiMetaStatus === 'failed';
+      if (mode === 'missing-only') return !album.summary || !album.genres?.length || !album.cast?.length;
+      return true;
+    })
+    .slice(0, limit);
+
+  const results: Array<{ id: string; title: string; ok: boolean; error?: string }> = [];
+  for (const { album, index } of candidates) {
+    try {
+      const metadata = await analyzeAlbumMetadataWithDeepSeek(album);
+      state.albums[index] = applyAiMetadataToAlbum(state.albums[index], metadata);
+      results.push({ id: album.id, title: album.title, ok: true });
+    } catch (error) {
+      state.albums[index] = {
+        ...state.albums[index],
+        aiMetaStatus: 'failed',
+        aiMetaUpdatedAt: new Date().toISOString()
+      };
+      results.push({ id: album.id, title: album.title, ok: false, error: error instanceof Error ? error.message : 'DeepSeek metadata analysis failed' });
+    }
+  }
+
+  writeState(state);
+  res.json({
+    albums: state.albums,
+    total: candidates.length,
+    updated: results.filter((result) => result.ok).length,
+    failed: results.filter((result) => !result.ok).length,
+    results
+  });
 });
 
 app.post('/api/albums/:id/cover/generate', async (req, res) => {
@@ -605,6 +1004,60 @@ app.post('/api/categories', (req, res) => {
   state.categories = [...state.categories, category];
   writeState(state);
   res.json({ category, categories: state.categories });
+});
+
+app.get('/api/favorite-folders', (_req, res) => {
+  res.json({ favoriteFolders: readState().favoriteFolders });
+});
+
+app.post('/api/favorite-folders', (req, res) => {
+  const name = stringField(req.body.name, 40);
+  if (!name) return res.status(400).json({ error: 'Favorite folder name is required' });
+
+  const state = readState();
+  const existing = state.favoriteFolders.find((folder) => folder.name === name);
+  if (existing) return res.json({ favoriteFolder: existing, favoriteFolders: state.favoriteFolders });
+
+  const now = nowIso();
+  const favoriteFolder: FavoriteFolder = {
+    id: `fav-${stableId(`${name}-${now}`, 14)}`,
+    name,
+    albumIds: [],
+    createdAt: now,
+    updatedAt: now
+  };
+  state.favoriteFolders = [...state.favoriteFolders, favoriteFolder];
+  writeState(state);
+  res.json({ favoriteFolder, favoriteFolders: state.favoriteFolders });
+});
+
+app.post('/api/favorite-folders/:folderId/albums/:albumId', (req, res) => {
+  const state = readState();
+  const folderIndex = state.favoriteFolders.findIndex((folder) => folder.id === req.params.folderId);
+  if (folderIndex < 0) return res.status(404).json({ error: 'Favorite folder not found' });
+  if (!state.albums.some((album) => album.id === req.params.albumId)) return res.status(404).json({ error: 'Album not found' });
+
+  state.favoriteFolders[folderIndex] = {
+    ...state.favoriteFolders[folderIndex],
+    albumIds: uniqueStrings([...state.favoriteFolders[folderIndex].albumIds, req.params.albumId]),
+    updatedAt: nowIso()
+  };
+  writeState(state);
+  res.json({ favoriteFolder: state.favoriteFolders[folderIndex], favoriteFolders: state.favoriteFolders });
+});
+
+app.delete('/api/favorite-folders/:folderId/albums/:albumId', (req, res) => {
+  const state = readState();
+  const folderIndex = state.favoriteFolders.findIndex((folder) => folder.id === req.params.folderId);
+  if (folderIndex < 0) return res.status(404).json({ error: 'Favorite folder not found' });
+
+  state.favoriteFolders[folderIndex] = {
+    ...state.favoriteFolders[folderIndex],
+    albumIds: state.favoriteFolders[folderIndex].albumIds.filter((albumId) => albumId !== req.params.albumId),
+    updatedAt: nowIso()
+  };
+  writeState(state);
+  res.json({ favoriteFolder: state.favoriteFolders[folderIndex], favoriteFolders: state.favoriteFolders });
 });
 
 app.get('/api/profile', (_req, res) => {
@@ -652,11 +1105,13 @@ app.post('/api/scan', async (_req, res) => {
 
   const files = listAudioFiles(root);
   const scannedAlbums = albumsFromFiles(root, files);
-  const coverResult = await generateMissingCovers(scannedAlbums);
+  const mergedAlbums = mergeManualMetadata(scannedAlbums, state.albums);
+  const coverResult = await generateMissingCovers(mergedAlbums);
   const next = {
     nas: { ...state.nas, connected: true, lastScanAt: new Date().toISOString() },
     albums: coverResult.albums.length ? coverResult.albums : state.albums,
     categories: state.categories,
+    favoriteFolders: state.favoriteFolders,
     profile: state.profile
   };
   writeState(next);

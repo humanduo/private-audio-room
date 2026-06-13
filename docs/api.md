@@ -123,6 +123,174 @@ POST /api/albums/:id/cover/generate
 - 默认图片模型为 `gpt-image-1`，可通过 `OPENAI_IMAGE_MODEL` 修改。
 - 生成后的封面会保存到 `/app/data/covers`，并通过 `/covers/...` 在应用内显示。
 
+## DeepSeek 整理专辑资料
+
+```http
+POST /api/albums/:id/metadata/analyze
+```
+
+说明：
+
+- 需要在后端环境变量中配置 `DEEPSEEK_API_KEY`。
+- 默认模型为 `deepseek-chat`，可通过 `DEEPSEEK_MODEL` 修改。
+- DeepSeek 会把识别结果直接保存到专辑资料里。
+- 用户后续可以在详情页点击 `编辑资料` 手动调整。
+
+推荐环境变量：
+
+```text
+DEEPSEEK_API_KEY=你的 DeepSeek key
+DEEPSEEK_MODEL=deepseek-chat
+DEEPSEEK_BASE_URL=https://api.deepseek.com/chat/completions
+```
+
+响应：
+
+```json
+{
+  "metadata": {
+    "author": "鱼宰",
+    "cast": ["风镜", "陶典"],
+    "summary": "一段围绕离别、重逢和自我选择展开的现代情感广播剧。",
+    "genres": ["现代", "言情", "治愈"],
+    "relationship": "男女",
+    "audience": "男女",
+    "finishStatus": "已完结",
+    "confidence": 0.72,
+    "needsReview": true
+  },
+  "album": {}
+}
+```
+
+## DeepSeek 一键整理全部广播剧
+
+```http
+POST /api/metadata/analyze-batch
+Content-Type: application/json
+```
+
+请求体：
+
+```json
+{
+  "kind": "drama",
+  "mode": "all",
+  "limit": 50
+}
+```
+
+说明：
+
+- `mode=all` 会整理所有广播剧。
+- `mode=missing-only` 只整理缺简介、缺标签或缺配音的广播剧。
+- `mode=failed-only` 只重试上次失败的广播剧。
+- 默认一次最多 50 部，可通过 `AI_METADATA_BATCH_LIMIT` 调整。
+- 前端 `我的 -> 一键编辑` 会调用这个接口。
+
+响应：
+
+```json
+{
+  "total": 35,
+  "updated": 32,
+  "failed": 3,
+  "albums": []
+}
+```
+
+## 保存专辑资料
+
+```http
+PATCH /api/albums/:id/metadata
+Content-Type: application/json
+```
+
+请求体：
+
+```json
+{
+  "author": "鱼宰",
+  "cast": ["风镜", "陶典"],
+  "summary": "剧情简介",
+  "genres": ["现代", "言情"],
+  "relationship": "男女",
+  "audience": "男女",
+  "finishStatus": "已完结"
+}
+```
+
+## 收藏夹
+
+### 获取收藏夹
+
+```http
+GET /api/favorite-folders
+```
+
+响应：
+
+```json
+{
+  "favoriteFolders": [
+    {
+      "id": "default",
+      "name": "默认收藏夹",
+      "albumIds": [],
+      "createdAt": "2026-06-13T00:00:00.000Z",
+      "updatedAt": "2026-06-13T00:00:00.000Z"
+    }
+  ]
+}
+```
+
+### 新建收藏夹
+
+```http
+POST /api/favorite-folders
+Content-Type: application/json
+```
+
+```json
+{
+  "name": "言情"
+}
+```
+
+### 收藏专辑
+
+```http
+POST /api/favorite-folders/:folderId/albums/:albumId
+```
+
+### 取消收藏
+
+```http
+DELETE /api/favorite-folders/:folderId/albums/:albumId
+```
+
+## 相关推荐
+
+```http
+GET /api/albums/:id/recommendations?limit=6
+```
+
+根据本地已保存的作者、配音演员、标签、感情向、主角组合和完结状态计算相似广播剧。这个接口不调用 DeepSeek，不会额外消耗 API。
+
+响应：
+
+```json
+{
+  "recommendations": [
+    {
+      "album": {},
+      "score": 9,
+      "reasons": ["同作者：墨宝非宝", "现代、言情"]
+    }
+  ]
+}
+```
+
 ## 获取分类
 
 ```http

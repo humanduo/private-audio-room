@@ -10,24 +10,33 @@ import {
   Play,
   RotateCcw,
   Search,
+  SlidersHorizontal,
   SkipBack,
   SkipForward,
   Sparkles
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  addAlbumToFavoriteFolder,
+  analyzeAlbumMetadata,
+  analyzeLibraryMetadata,
+  createFavoriteFolder,
   createCategory,
+  fetchAlbumRecommendations,
   fetchAlbums,
   fetchCategories,
+  fetchFavoriteFolders,
   fetchNas,
   fetchProfile,
   generateAlbumCover,
+  removeAlbumFromFavoriteFolder,
   saveNas,
   scanNas,
   updateAlbumCover,
+  updateAlbumMetadata,
   updateProfileAvatar
 } from './api';
-import type { Album, AppView, Category, Episode, MediaKind, NasConfig } from './types';
+import type { Album, AlbumRecommendation, AppView, Category, Episode, FavoriteFolder, MediaKind, NasConfig } from './types';
 
 const tabs: Array<{ kind: MediaKind; label: string }> = [
   { kind: 'drama', label: '广播剧' },
@@ -52,6 +61,25 @@ type SketchIconName =
   | 'backup'
   | 'settings'
   | 'cache';
+
+type MetadataFilters = {
+  relationship: string;
+  audience: string;
+  finishStatus: string;
+  genres: string[];
+};
+
+const emptyMetadataFilters: MetadataFilters = {
+  relationship: '',
+  audience: '',
+  finishStatus: '',
+  genres: []
+};
+
+const relationshipOptions = ['言情', '耽美', '百合', '无 CP', '群像'];
+const audienceOptions = ['男女', '男男', '女女', '群像'];
+const finishStatusOptions = ['已完结', '连载中', '未知'];
+const genreOptions = ['悬疑', '恐怖', '刑侦', '甜宠', '虐恋', '权谋', '无限流', '校园', '娱乐圈', '古风', '现代', '修仙'];
 
 const navItems: Array<{ view: AppView; label: string; icon: SketchIconName }> = [
   { view: 'home', label: '首页', icon: 'home' },
@@ -82,11 +110,67 @@ function formatClock(seconds: number) {
   return `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`;
 }
 
+function splitList(value: string) {
+  return [...new Set(value.split(/[，,、\n]/).map((item) => item.trim()).filter(Boolean))];
+}
+
+function joinList(values?: string[]) {
+  return (values || []).join('、');
+}
+
+function albumSummary(album: Album) {
+  return album.summary || album.description || album.subtitle;
+}
+
+function albumChips(album: Album, limit = 4) {
+  return [...new Set([album.finishStatus, album.relationship, ...(album.genres || []), ...(album.tags || [])].filter(Boolean) as string[])].slice(
+    0,
+    limit
+  );
+}
+
+function filterValues(album: Album) {
+  return [
+    album.title,
+    album.subtitle,
+    album.summary || '',
+    album.description || '',
+    album.relationship || '',
+    album.audience || '',
+    album.finishStatus || '',
+    ...(album.genres || []),
+    ...(album.tags || [])
+  ].filter(Boolean);
+}
+
+function hasFilterValue(album: Album, value: string) {
+  const aliases: Record<string, string[]> = {
+    已完结: ['已完结', '完结'],
+    连载中: ['连载中', '更新', '连载']
+  };
+  const targets = aliases[value] || [value];
+  return filterValues(album).some((item) => targets.some((target) => item.includes(target)));
+}
+
+function matchesMetadataFilters(album: Album, filters: MetadataFilters) {
+  if (filters.relationship && !hasFilterValue(album, filters.relationship)) return false;
+  if (filters.audience && !hasFilterValue(album, filters.audience)) return false;
+  if (filters.finishStatus === '未知' && album.finishStatus) return false;
+  if (filters.finishStatus && filters.finishStatus !== '未知' && !hasFilterValue(album, filters.finishStatus)) return false;
+  if (filters.genres.length && !filters.genres.every((genre) => hasFilterValue(album, genre))) return false;
+  return true;
+}
+
+function metadataFilterCount(filters: MetadataFilters) {
+  return Number(Boolean(filters.relationship)) + Number(Boolean(filters.audience)) + Number(Boolean(filters.finishStatus)) + filters.genres.length;
+}
+
 export function App() {
   const [view, setView] = useState<AppView>('home');
   const [activeKind, setActiveKind] = useState<MediaKind>('drama');
   const [albums, setAlbums] = useState<Album[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [favoriteFolders, setFavoriteFolders] = useState<FavoriteFolder[]>([]);
   const [activeCategory, setActiveCategory] = useState('');
   const [nas, setNas] = useState<NasConfig | null>(null);
   const [selectedAlbum, setSelectedAlbum] = useState<Album | null>(null);
@@ -104,10 +188,16 @@ export function App() {
   async function load(kind = activeKind, q = query, category = activeCategory) {
     setIsLoading(true);
     try {
-      const [nextAlbums, nextNas, nextCategories] = await Promise.all([fetchAlbums(kind, q, category), fetchNas(), fetchCategories()]);
+      const [nextAlbums, nextNas, nextCategories, nextFavoriteFolders] = await Promise.all([
+        fetchAlbums(kind, q, category),
+        fetchNas(),
+        fetchCategories(),
+        fetchFavoriteFolders()
+      ]);
       setAlbums(nextAlbums);
       setNas(nextNas);
       setCategories(nextCategories);
+      setFavoriteFolders(nextFavoriteFolders);
       setNasRoot(nextNas.root || '');
       setSelectedAlbum((current) => {
         if (!current) return null;
@@ -226,6 +316,25 @@ export function App() {
     setNotice('分类已添加');
   }
 
+  async function handleCreateFavoriteFolder(name: string) {
+    const nextFolders = await createFavoriteFolder(name);
+    setFavoriteFolders(nextFolders);
+    setNotice('收藏夹已创建');
+    return nextFolders;
+  }
+
+  async function handleAddFavorite(folderId: string, albumId: string) {
+    const nextFolders = await addAlbumToFavoriteFolder(folderId, albumId);
+    setFavoriteFolders(nextFolders);
+    setNotice('已加入收藏');
+  }
+
+  async function handleRemoveFavorite(folderId: string, albumId: string) {
+    const nextFolders = await removeAlbumFromFavoriteFolder(folderId, albumId);
+    setFavoriteFolders(nextFolders);
+    setNotice('已取消收藏');
+  }
+
   async function handleCoverChange(albumId: string, cover: string) {
     const updatedAlbum = await updateAlbumCover(albumId, cover);
     setAlbums((current) => current.map((album) => (album.id === albumId ? updatedAlbum : album)));
@@ -242,6 +351,42 @@ export function App() {
       setNotice('AI 封面已生成');
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'AI 封面生成失败');
+    }
+  }
+
+  async function handleMetadataChange(albumId: string, metadata: Partial<Album>) {
+    const updatedAlbum = await updateAlbumMetadata(albumId, metadata);
+    setAlbums((current) => current.map((album) => (album.id === albumId ? updatedAlbum : album)));
+    setSelectedAlbum((current) => (current?.id === albumId ? updatedAlbum : current));
+    setPlayerAlbum((current) => (current?.id === albumId ? updatedAlbum : current));
+    setNotice('资料已保存');
+  }
+
+  async function handleAnalyzeMetadata(albumId: string) {
+    try {
+      setNotice('DeepSeek 正在整理资料...');
+      const result = await analyzeAlbumMetadata(albumId);
+      setAlbums((current) => current.map((album) => (album.id === albumId ? result.album : album)));
+      setSelectedAlbum((current) => (current?.id === albumId ? result.album : current));
+      setPlayerAlbum((current) => (current?.id === albumId ? result.album : current));
+      setNotice(result.metadata.needsReview ? 'DeepSeek 已保存资料，你可以随时手动调整' : 'DeepSeek 已保存资料');
+      return result;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'DeepSeek 资料整理失败');
+      throw error;
+    }
+  }
+
+  async function handleAnalyzeLibraryMetadata() {
+    try {
+      setNotice('DeepSeek 正在整理全部广播剧，这会需要一点时间...');
+      const result = await analyzeLibraryMetadata();
+      setAlbums(result.albums.filter((album) => album.kind === activeKind));
+      setSelectedAlbum((current) => (current ? result.albums.find((album) => album.id === current.id) || current : current));
+      setPlayerAlbum((current) => (current ? result.albums.find((album) => album.id === current.id) || current : current));
+      setNotice(`全库整理完成：成功 ${result.updated} 部，失败 ${result.failed} 部`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'DeepSeek 全库整理失败');
     }
   }
 
@@ -312,15 +457,32 @@ export function App() {
           {view === 'search' ? (
             <SearchView query={query} setQuery={(value) => void handleSearch(value)} albums={albums} onOpen={setSelectedAlbum} onPlay={playAlbum} />
           ) : null}
-          {view === 'me' ? <MeView nas={nas} albums={albums} categories={categories} onAddCategory={handleAddCategory} /> : null}
+          {view === 'me' ? (
+            <MeView
+              nas={nas}
+              albums={albums}
+              categories={categories}
+              favoriteFolders={favoriteFolders}
+              onAddCategory={handleAddCategory}
+              onAnalyzeLibrary={handleAnalyzeLibraryMetadata}
+              onOpen={setSelectedAlbum}
+            />
+          ) : null}
         </section>
 
         {selectedAlbum ? (
           <AlbumDrawer
             album={selectedAlbum}
             onClose={() => setSelectedAlbum(null)}
+            onOpenAlbum={setSelectedAlbum}
             onCoverChange={handleCoverChange}
             onGenerateCover={handleGenerateCover}
+            onMetadataChange={handleMetadataChange}
+            onAnalyzeMetadata={handleAnalyzeMetadata}
+            favoriteFolders={favoriteFolders}
+            onCreateFavoriteFolder={handleCreateFavoriteFolder}
+            onAddFavorite={handleAddFavorite}
+            onRemoveFavorite={handleRemoveFavorite}
             onPlay={playAlbum}
             currentEpisodeId={displayedPlayerEpisode?.id}
             isPlaying={isPlaying}
@@ -420,6 +582,9 @@ function HomeView({
   isPlaying: boolean;
   onTogglePlay: () => void;
 }) {
+  const [filters, setFilters] = useState<MetadataFilters>(emptyMetadataFilters);
+  const [isFilterOpen, setIsFilterOpen] = useState(false);
+  const filteredAlbums = useMemo(() => albums.filter((album) => matchesMetadataFilters(album, filters)), [albums, filters]);
   const hero = currentAlbum || albums.find((album) => album.status === 'listening') || albums[0];
   const heroProgress = currentAlbum?.id === hero?.id ? audioProgress : hero?.progress || 0;
   const isHeroCurrent = Boolean(hero && currentAlbum?.id === hero.id);
@@ -492,10 +657,21 @@ function HomeView({
       <SectionHeader title={kindLabel(activeKind)} subtitle="本地 NAS 内容 ›" />
       <CategoryChips categories={categories} activeCategory={activeCategory} onChange={onCategoryChange} />
       {activeKind === 'drama' ? (
+        <MetadataFilterPanel
+          filters={filters}
+          onChange={setFilters}
+          isOpen={isFilterOpen}
+          onToggle={() => setIsFilterOpen((value) => !value)}
+          total={albums.length}
+          matched={filteredAlbums.length}
+        />
+      ) : null}
+      {activeKind === 'drama' ? (
         <div className="drama-list">
-          {albums.map((album) => (
+          {filteredAlbums.map((album) => (
             <DramaListRow key={album.id} album={album} onOpen={onOpen} onPlay={onPlay} />
           ))}
+          {!filteredAlbums.length ? <div className="empty-state compact">没有找到符合筛选的广播剧</div> : null}
         </div>
       ) : (
         <div className="album-grid">
@@ -507,7 +683,7 @@ function HomeView({
 
       <SectionHeader title="睡前继续" subtitle="保留断点，安静续播" />
       <div className="soft-list">
-        {albums.slice(0, 3).map((album) => (
+        {(activeKind === 'drama' ? filteredAlbums : albums).slice(0, 3).map((album) => (
           <button key={album.id} onClick={() => onOpen(album)}>
             <Clock3 size={18} />
             <span>{album.title}</span>
@@ -537,7 +713,15 @@ function DramaListRow({
         <span className="drama-row-cover" style={{ background: coverBackground(album.cover) }} />
         <span className="drama-row-copy">
           <strong>{album.title}</strong>
-          <small>{album.subtitle}</small>
+          <small>{album.author || album.cast?.[0] ? [album.author, album.cast?.[0]].filter(Boolean).join(' · ') : album.subtitle}</small>
+          <span className="drama-row-summary">{albumSummary(album)}</span>
+          {albumChips(album, 3).length ? (
+            <span className="metadata-chips compact">
+              {albumChips(album, 3).map((chip) => (
+                <i key={chip}>{chip}</i>
+              ))}
+            </span>
+          ) : null}
           <em>
             已播放 <b>{album.progress}%</b> · 上次听到 <b>第 {String(lastIndex).padStart(2, '0')} 集</b>
           </em>
@@ -743,6 +927,102 @@ function CategoryChips({
   );
 }
 
+function MetadataFilterPanel({
+  filters,
+  onChange,
+  isOpen,
+  onToggle,
+  total,
+  matched
+}: {
+  filters: MetadataFilters;
+  onChange: (filters: MetadataFilters) => void;
+  isOpen: boolean;
+  onToggle: () => void;
+  total: number;
+  matched: number;
+}) {
+  const activeCount = metadataFilterCount(filters);
+
+  function setSingle(field: 'relationship' | 'audience' | 'finishStatus', value: string) {
+    onChange({ ...filters, [field]: filters[field] === value ? '' : value });
+  }
+
+  function toggleGenre(value: string) {
+    const exists = filters.genres.includes(value);
+    onChange({
+      ...filters,
+      genres: exists ? filters.genres.filter((genre) => genre !== value) : [...filters.genres, value]
+    });
+  }
+
+  return (
+    <section className="filter-block">
+      <button className={activeCount ? 'filter-trigger active' : 'filter-trigger'} onClick={onToggle}>
+        <SlidersHorizontal size={16} />
+        <span>{activeCount ? `已筛选 ${activeCount}` : '筛选'}</span>
+        <small>
+          {matched}/{total}
+        </small>
+      </button>
+      {activeCount ? (
+        <button className="filter-clear" onClick={() => onChange(emptyMetadataFilters)}>
+          清空
+        </button>
+      ) : null}
+      {isOpen ? (
+        <div className="filter-sheet">
+          <FilterGroup title="感情向">
+            {relationshipOptions.map((option) => (
+              <FilterChip key={option} active={filters.relationship === option} onClick={() => setSingle('relationship', option)}>
+                {option}
+              </FilterChip>
+            ))}
+          </FilterGroup>
+          <FilterGroup title="主角组合">
+            {audienceOptions.map((option) => (
+              <FilterChip key={option} active={filters.audience === option} onClick={() => setSingle('audience', option)}>
+                {option}
+              </FilterChip>
+            ))}
+          </FilterGroup>
+          <FilterGroup title="完结状态">
+            {finishStatusOptions.map((option) => (
+              <FilterChip key={option} active={filters.finishStatus === option} onClick={() => setSingle('finishStatus', option)}>
+                {option}
+              </FilterChip>
+            ))}
+          </FilterGroup>
+          <FilterGroup title="类型">
+            {genreOptions.map((option) => (
+              <FilterChip key={option} active={filters.genres.includes(option)} onClick={() => toggleGenre(option)}>
+                {option}
+              </FilterChip>
+            ))}
+          </FilterGroup>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function FilterGroup({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="filter-group">
+      <strong>{title}</strong>
+      <div>{children}</div>
+    </div>
+  );
+}
+
+function FilterChip({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button className={active ? 'active' : ''} onClick={onClick}>
+      {children}
+    </button>
+  );
+}
+
 function AlbumCard({ album, active, onOpen }: { album: Album; active?: boolean; onOpen: (album: Album) => void }) {
   return (
     <button className={active ? 'album-card active' : 'album-card'} onClick={() => onOpen(album)}>
@@ -917,16 +1197,24 @@ function MeView({
   nas,
   albums,
   categories,
-  onAddCategory
+  favoriteFolders,
+  onAddCategory,
+  onAnalyzeLibrary,
+  onOpen
 }: {
   nas: NasConfig | null;
   albums: Album[];
   categories: Category[];
+  favoriteFolders: FavoriteFolder[];
   onAddCategory: (name: string) => Promise<void>;
+  onAnalyzeLibrary: () => Promise<void>;
+  onOpen: (album: Album) => void;
 }) {
   const [categoryName, setCategoryName] = useState('');
   const [avatar, setAvatar] = useState('');
   const [isSavingAvatar, setIsSavingAvatar] = useState(false);
+  const [favoriteQuery, setFavoriteQuery] = useState('');
+  const [activeFavoriteFolderId, setActiveFavoriteFolderId] = useState('all');
 
   useEffect(() => {
     fetchProfile()
@@ -973,6 +1261,18 @@ function MeView({
     { icon: 'backup', label: '数据备份', note: '保护记录' },
     { icon: 'settings', label: '应用设置', note: '偏好设置' }
   ];
+  const favoriteAlbumIds =
+    activeFavoriteFolderId === 'all'
+      ? [...new Set(favoriteFolders.flatMap((folder) => folder.albumIds))]
+      : favoriteFolders.find((folder) => folder.id === activeFavoriteFolderId)?.albumIds || [];
+  const favoriteAlbums = albums.filter((album) => {
+    if (!favoriteAlbumIds.includes(album.id)) return false;
+    const q = favoriteQuery.trim().toLowerCase();
+    if (!q) return true;
+    return [album.title, album.subtitle, album.author || '', album.summary || '', ...(album.tags || []), ...(album.genres || [])].some((value) =>
+      value.toLowerCase().includes(q)
+    );
+  });
 
   return (
     <section className="me-page">
@@ -1013,7 +1313,46 @@ function MeView({
         </div>
       </div>
 
+      <section className="favorites-panel">
+        <SectionHeader title="我的收藏" subtitle={`${favoriteAlbumIds.length} 部`} />
+        <div className="favorite-search">
+          <Search size={16} />
+          <input value={favoriteQuery} onChange={(event) => setFavoriteQuery(event.target.value)} placeholder="搜索收藏里的广播剧" />
+        </div>
+        <div className="favorite-folder-tabs">
+          <button className={activeFavoriteFolderId === 'all' ? 'active' : ''} onClick={() => setActiveFavoriteFolderId('all')}>
+            全部
+          </button>
+          {favoriteFolders.map((folder) => (
+            <button
+              key={folder.id}
+              className={activeFavoriteFolderId === folder.id ? 'active' : ''}
+              onClick={() => setActiveFavoriteFolderId(folder.id)}
+            >
+              {folder.name}
+            </button>
+          ))}
+        </div>
+        <div className="favorite-album-list">
+          {favoriteAlbums.map((album) => (
+            <button key={album.id} onClick={() => onOpen(album)}>
+              <span className="mini-cover" style={{ background: coverBackground(album.cover) }} />
+              <span>
+                <strong>{album.title}</strong>
+                <small>{albumChips(album, 3).join(' · ') || album.subtitle}</small>
+              </span>
+            </button>
+          ))}
+          {!favoriteAlbums.length ? <p>还没有收藏，点进广播剧详情可以加入收藏夹。</p> : null}
+        </div>
+      </section>
+
       <div className="me-tool-grid">
+        <button onClick={() => void onAnalyzeLibrary()}>
+          <SketchIcon name="settings" decorated />
+          <strong>一键编辑</strong>
+          <span>DeepSeek 整理</span>
+        </button>
         {myTools.map((tool) => (
           <button key={tool.label}>
             <SketchIcon name={tool.icon} decorated />
@@ -1047,8 +1386,15 @@ function MeView({
 function AlbumDrawer({
   album,
   onClose,
+  onOpenAlbum,
   onCoverChange,
   onGenerateCover,
+  onMetadataChange,
+  onAnalyzeMetadata,
+  favoriteFolders,
+  onCreateFavoriteFolder,
+  onAddFavorite,
+  onRemoveFavorite,
   onPlay,
   currentEpisodeId,
   isPlaying,
@@ -1060,8 +1406,15 @@ function AlbumDrawer({
 }: {
   album: Album;
   onClose: () => void;
+  onOpenAlbum: (album: Album) => void;
   onCoverChange: (albumId: string, cover: string) => Promise<void>;
   onGenerateCover: (albumId: string) => Promise<void>;
+  onMetadataChange: (albumId: string, metadata: Partial<Album>) => Promise<void>;
+  onAnalyzeMetadata: (albumId: string) => Promise<{ metadata: Partial<Album> & { confidence?: number; needsReview?: boolean }; album: Album }>;
+  favoriteFolders: FavoriteFolder[];
+  onCreateFavoriteFolder: (name: string) => Promise<FavoriteFolder[]>;
+  onAddFavorite: (folderId: string, albumId: string) => Promise<void>;
+  onRemoveFavorite: (folderId: string, albumId: string) => Promise<void>;
   onPlay: (album: Album, episode?: Episode) => void;
   currentEpisodeId?: string;
   isPlaying: boolean;
@@ -1073,7 +1426,24 @@ function AlbumDrawer({
 }) {
   const [isSavingCover, setIsSavingCover] = useState(false);
   const [isGeneratingCover, setIsGeneratingCover] = useState(false);
+  const [isEditingMetadata, setIsEditingMetadata] = useState(false);
+  const [isSavingMetadata, setIsSavingMetadata] = useState(false);
+  const [isAnalyzingMetadata, setIsAnalyzingMetadata] = useState(false);
+  const [isFavoriteModalOpen, setIsFavoriteModalOpen] = useState(false);
+  const [newFavoriteFolderName, setNewFavoriteFolderName] = useState('');
+  const [isSavingFavorite, setIsSavingFavorite] = useState(false);
+  const [recommendations, setRecommendations] = useState<AlbumRecommendation[]>([]);
+  const [isLoadingRecommendations, setIsLoadingRecommendations] = useState(false);
   const [activeTab, setActiveTab] = useState<'summary' | 'episodes' | 'files'>('summary');
+  const [metadataDraft, setMetadataDraft] = useState({
+    author: album.author || '',
+    cast: joinList(album.cast),
+    summary: album.summary || album.description || '',
+    genres: joinList(album.genres?.length ? album.genres : album.tags),
+    relationship: album.relationship || '',
+    audience: album.audience || '',
+    finishStatus: album.finishStatus || ''
+  });
   const activeEpisode =
     album.episodes.find((episode) => episode.id === currentEpisodeId) ||
     album.episodes.find((episode) => (episode.progress || 0) < 100) ||
@@ -1084,6 +1454,84 @@ function AlbumDrawer({
   );
   const previousEpisode = album.episodes.slice(0, activeEpisodeIndex).reverse().find((episode) => episode.filePath);
   const nextEpisode = album.episodes.slice(activeEpisodeIndex + 1).find((episode) => episode.filePath);
+  const isFavorited = favoriteFolders.some((folder) => folder.albumIds.includes(album.id));
+
+  useEffect(() => {
+    setMetadataDraft({
+      author: album.author || '',
+      cast: joinList(album.cast),
+      summary: album.summary || album.description || '',
+      genres: joinList(album.genres?.length ? album.genres : album.tags),
+      relationship: album.relationship || '',
+      audience: album.audience || '',
+      finishStatus: album.finishStatus || ''
+    });
+    setIsEditingMetadata(false);
+  }, [album.id, album.author, album.cast, album.summary, album.description, album.genres, album.tags, album.relationship, album.audience, album.finishStatus]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setIsLoadingRecommendations(true);
+    fetchAlbumRecommendations(album.id)
+      .then((items) => {
+        if (!cancelled) setRecommendations(items);
+      })
+      .catch(() => {
+        if (!cancelled) setRecommendations([]);
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingRecommendations(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [album.id]);
+
+  async function submitMetadata(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setIsSavingMetadata(true);
+    try {
+      await onMetadataChange(album.id, {
+        author: metadataDraft.author,
+        cast: splitList(metadataDraft.cast),
+        summary: metadataDraft.summary,
+        description: metadataDraft.summary,
+        genres: splitList(metadataDraft.genres),
+        tags: splitList(metadataDraft.genres),
+        relationship: metadataDraft.relationship,
+        audience: metadataDraft.audience,
+        finishStatus: metadataDraft.finishStatus
+      });
+      setIsEditingMetadata(false);
+    } finally {
+      setIsSavingMetadata(false);
+    }
+  }
+
+  function updateMetadataDraft(field: keyof typeof metadataDraft, value: string) {
+    setMetadataDraft((current) => ({ ...current, [field]: value }));
+  }
+
+  async function handleAnalyzeMetadata() {
+    setIsAnalyzingMetadata(true);
+    try {
+      const result = await onAnalyzeMetadata(album.id);
+      const updatedAlbum = result.album;
+      setMetadataDraft((current) => ({
+        author: updatedAlbum.author || current.author,
+        cast: updatedAlbum.cast?.length ? joinList(updatedAlbum.cast) : current.cast,
+        summary: updatedAlbum.summary || current.summary,
+        genres: updatedAlbum.genres?.length ? joinList(updatedAlbum.genres) : current.genres,
+        relationship: updatedAlbum.relationship || current.relationship,
+        audience: updatedAlbum.audience || current.audience,
+        finishStatus: updatedAlbum.finishStatus || current.finishStatus
+      }));
+      setIsEditingMetadata(false);
+      setActiveTab('summary');
+    } finally {
+      setIsAnalyzingMetadata(false);
+    }
+  }
 
   async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -1101,6 +1549,32 @@ function AlbumDrawer({
       }
     };
     reader.readAsDataURL(file);
+  }
+
+  async function toggleFavorite(folderId: string) {
+    setIsSavingFavorite(true);
+    try {
+      const folder = favoriteFolders.find((item) => item.id === folderId);
+      if (folder?.albumIds.includes(album.id)) await onRemoveFavorite(folderId, album.id);
+      else await onAddFavorite(folderId, album.id);
+    } finally {
+      setIsSavingFavorite(false);
+    }
+  }
+
+  async function createAndAddFavoriteFolder(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const name = newFavoriteFolderName.trim();
+    if (!name) return;
+    setIsSavingFavorite(true);
+    try {
+      const folders = await onCreateFavoriteFolder(name);
+      const folder = folders.find((item) => item.name === name);
+      if (folder) await onAddFavorite(folder.id, album.id);
+      setNewFavoriteFolderName('');
+    } finally {
+      setIsSavingFavorite(false);
+    }
   }
 
   return (
@@ -1123,16 +1597,16 @@ function AlbumDrawer({
 
         <div className="player-cover-stage" style={{ background: coverBackground(album.cover) }}>
           <div className="player-cover-title">
-            <span>{kindLabel(album.kind)} · {album.totalEpisodes} 集</span>
+            <span>{[kindLabel(album.kind), album.finishStatus, album.relationship].filter(Boolean).join(' · ') || `${kindLabel(album.kind)} · ${album.totalEpisodes} 集`}</span>
             <strong>{album.title}</strong>
           </div>
         </div>
 
         <div className="player-sheet">
           <div className="player-actions" aria-label="播放操作">
-            <button>
-              <Heart size={27} />
-              <span>喜欢</span>
+            <button className={isFavorited ? 'active' : ''} onClick={() => setIsFavoriteModalOpen(true)}>
+              <Heart size={27} fill={isFavorited ? 'currentColor' : 'none'} />
+              <span>{isFavorited ? '已收藏' : '收藏'}</span>
             </button>
             <button>
               <Download size={26} />
@@ -1203,8 +1677,85 @@ function AlbumDrawer({
 
           {activeTab === 'summary' ? (
             <div className="player-summary">
-              <span className="kind-badge">{kindLabel(album.kind)}</span>
-              <p>{album.description}</p>
+              <div className="summary-heading">
+                <span className="kind-badge">{kindLabel(album.kind)}</span>
+                <div>
+                  <button onClick={handleAnalyzeMetadata} disabled={isAnalyzingMetadata}>
+                    {isAnalyzingMetadata ? '整理中...' : 'AI 整理资料'}
+                  </button>
+                  <button onClick={() => setIsEditingMetadata((value) => !value)}>{isEditingMetadata ? '收起编辑' : '编辑资料'}</button>
+                </div>
+              </div>
+              {album.aiMetaStatus ? (
+                <small className="ai-meta-status">
+                  {album.aiMetaStatus === 'suggested'
+                    ? 'DeepSeek 已生成建议，确认后保存'
+                    : album.aiMetaStatus === 'failed'
+                      ? 'DeepSeek 上次整理失败'
+                      : album.aiMetaStatus === 'saved'
+                        ? 'AI 资料已保存'
+                        : '尚未 AI 整理'}
+                </small>
+              ) : null}
+              <p>{albumSummary(album)}</p>
+              <div className="metadata-chips">
+                {albumChips(album, 8).map((chip) => (
+                  <i key={chip}>{chip}</i>
+                ))}
+              </div>
+              <div className="metadata-grid">
+                <div>
+                  <span>作者</span>
+                  <strong>{album.author || '未填写'}</strong>
+                </div>
+                <div>
+                  <span>配音</span>
+                  <strong>{album.cast?.length ? joinList(album.cast) : '未填写'}</strong>
+                </div>
+                <div>
+                  <span>主角组合</span>
+                  <strong>{album.audience || '未填写'}</strong>
+                </div>
+                <div>
+                  <span>状态</span>
+                  <strong>{album.finishStatus || '未知'}</strong>
+                </div>
+              </div>
+              {isEditingMetadata ? (
+                <form className="metadata-form" onSubmit={submitMetadata}>
+                  <label>
+                    <span>剧情简介</span>
+                    <textarea value={metadataDraft.summary} onChange={(event) => updateMetadataDraft('summary', event.target.value)} />
+                  </label>
+                  <label>
+                    <span>作者 / 原著</span>
+                    <input value={metadataDraft.author} onChange={(event) => updateMetadataDraft('author', event.target.value)} placeholder="例如 墨宝非宝" />
+                  </label>
+                  <label>
+                    <span>配音演员</span>
+                    <input value={metadataDraft.cast} onChange={(event) => updateMetadataDraft('cast', event.target.value)} placeholder="用逗号分隔，例如 风镜、陶典" />
+                  </label>
+                  <label>
+                    <span>标签 / 类型</span>
+                    <input value={metadataDraft.genres} onChange={(event) => updateMetadataDraft('genres', event.target.value)} placeholder="悬疑、现代、言情、已完结" />
+                  </label>
+                  <div className="metadata-form-row">
+                    <label>
+                      <span>感情向</span>
+                      <input value={metadataDraft.relationship} onChange={(event) => updateMetadataDraft('relationship', event.target.value)} placeholder="言情 / 耽美 / 百合" />
+                    </label>
+                    <label>
+                      <span>主角组合</span>
+                      <input value={metadataDraft.audience} onChange={(event) => updateMetadataDraft('audience', event.target.value)} placeholder="男女 / 男男 / 女女" />
+                    </label>
+                  </div>
+                  <label>
+                    <span>完结状态</span>
+                    <input value={metadataDraft.finishStatus} onChange={(event) => updateMetadataDraft('finishStatus', event.target.value)} placeholder="已完结 / 连载中 / 未知" />
+                  </label>
+                  <button disabled={isSavingMetadata}>{isSavingMetadata ? '保存中...' : '保存资料'}</button>
+                </form>
+              ) : null}
               <div className="cover-tools">
                 <label className="cover-upload">
                   <input type="file" accept="image/*" onChange={handleFileChange} />
@@ -1225,6 +1776,29 @@ function AlbumDrawer({
                   {isGeneratingCover ? '生成中...' : 'AI 封面'}
                 </button>
               </div>
+              <section className="recommendation-panel">
+                <div className="recommendation-head">
+                  <strong>你可能还想听</strong>
+                  <span>{isLoadingRecommendations ? '匹配中...' : `${recommendations.length} 部`}</span>
+                </div>
+                <div className="recommendation-list">
+                  {recommendations.map((item) => {
+                    const nextEpisode = item.album.episodes.find((episode) => (episode.progress || 0) < 100) || item.album.episodes[0];
+                    return (
+                      <button key={item.album.id} onClick={() => onOpenAlbum(item.album)}>
+                        <span className="recommendation-cover" style={{ background: coverBackground(item.album.cover) }} />
+                        <span className="recommendation-copy">
+                          <strong>{item.album.title}</strong>
+                          <small>{item.reasons.slice(0, 3).join(' · ') || item.album.subtitle}</small>
+                          <em>{nextEpisode?.title ? `可从 ${nextEpisode.title} 开始` : `${item.album.totalEpisodes} 集`}</em>
+                        </span>
+                        <i>{item.score}</i>
+                      </button>
+                    );
+                  })}
+                  {!isLoadingRecommendations && !recommendations.length ? <p>资料整理后，这里会推荐同作者、同配音或同题材的本地广播剧。</p> : null}
+                </div>
+              </section>
             </div>
           ) : null}
 
@@ -1266,6 +1840,34 @@ function AlbumDrawer({
                 ))}
               </div>
             </>
+          ) : null}
+
+          {isFavoriteModalOpen ? (
+            <div className="favorite-modal" role="dialog" aria-label="收藏到">
+              <div className="favorite-modal-head">
+                <strong>收藏到</strong>
+                <button onClick={() => setIsFavoriteModalOpen(false)}>关闭</button>
+              </div>
+              <div className="favorite-folder-list">
+                {favoriteFolders.map((folder) => {
+                  const active = folder.albumIds.includes(album.id);
+                  return (
+                    <button key={folder.id} className={active ? 'active' : ''} disabled={isSavingFavorite} onClick={() => void toggleFavorite(folder.id)}>
+                      <span>{folder.name}</span>
+                      <small>{active ? '已收藏' : `${folder.albumIds.length} 部`}</small>
+                    </button>
+                  );
+                })}
+              </div>
+              <form className="favorite-create-form" onSubmit={createAndAddFavoriteFolder}>
+                <input
+                  value={newFavoriteFolderName}
+                  onChange={(event) => setNewFavoriteFolderName(event.target.value)}
+                  placeholder="新建收藏夹，比如 言情"
+                />
+                <button disabled={isSavingFavorite}>{isSavingFavorite ? '保存中' : '新建'}</button>
+              </form>
+            </div>
           ) : null}
         </div>
       </div>

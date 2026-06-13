@@ -22,12 +22,35 @@ export type Album = {
   updatedAt: string;
   tags: string[];
   description: string;
+  author?: string;
+  cast?: string[];
+  summary?: string;
+  genres?: string[];
+  relationship?: string;
+  audience?: string;
+  finishStatus?: string;
+  aiMetaStatus?: 'none' | 'suggested' | 'saved' | 'failed';
+  aiMetaUpdatedAt?: string;
   episodes: Episode[];
 };
 
 export type Category = {
   id: string;
   name: string;
+};
+
+export type FavoriteFolder = {
+  id: string;
+  name: string;
+  albumIds: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AlbumRecommendation = {
+  album: Album;
+  score: number;
+  reasons: string[];
 };
 
 export type UserProfile = {
