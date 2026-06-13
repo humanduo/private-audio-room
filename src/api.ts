@@ -1,12 +1,25 @@
-import type { Album, AlbumRecommendation, Category, FavoriteFolder, MediaKind, NasConfig, UserProfile } from './types';
+import type {
+  Album,
+  AlbumRecommendation,
+  Category,
+  FavoriteFolder,
+  MediaKind,
+  MetadataAnalyzeEstimate,
+  MetadataAnalyzeJob,
+  MetadataAnalyzeMode,
+  NasConfig,
+  SearchMode,
+  UserProfile
+} from './types';
 
 const jsonHeaders = { 'Content-Type': 'application/json' };
 
-export async function fetchAlbums(kind?: MediaKind, q?: string, category?: string): Promise<Album[]> {
+export async function fetchAlbums(kind?: MediaKind, q?: string, category?: string, searchMode: SearchMode = 'text'): Promise<Album[]> {
   const params = new URLSearchParams();
   if (kind) params.set('kind', kind);
   if (q) params.set('q', q);
   if (category) params.set('category', category);
+  if (searchMode !== 'text') params.set('searchMode', searchMode);
   const response = await fetch(`/api/albums?${params.toString()}`);
   if (!response.ok) throw new Error('专辑列表加载失败');
   const data = await response.json();
@@ -144,15 +157,43 @@ export async function analyzeAlbumMetadata(
   return { metadata: data.metadata, album: data.album };
 }
 
-export async function analyzeLibraryMetadata(): Promise<{ albums: Album[]; total: number; updated: number; failed: number }> {
-  const response = await fetch('/api/metadata/analyze-batch', {
+export async function estimateLibraryMetadata(mode: MetadataAnalyzeMode = 'all'): Promise<MetadataAnalyzeEstimate> {
+  const response = await fetch('/api/metadata/analyze-batch/estimate', {
     method: 'POST',
     headers: jsonHeaders,
-    body: JSON.stringify({ kind: 'drama', mode: 'all', limit: 50 })
+    body: JSON.stringify({ kind: 'drama', mode, limit: 50 })
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || 'DeepSeek 全库整理失败');
+  if (!response.ok) throw new Error(data.error || 'DeepSeek 整理数量预估失败');
   return data;
+}
+
+export async function analyzeLibraryMetadata(
+  mode: MetadataAnalyzeMode = 'all',
+  onProgress?: (job: MetadataAnalyzeJob) => void
+): Promise<{ job: MetadataAnalyzeJob; albums: Album[] }> {
+  const startResponse = await fetch('/api/metadata/analyze-batch/jobs', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ kind: 'drama', mode, limit: 50 })
+  });
+  const startData = await startResponse.json();
+  if (!startResponse.ok) throw new Error(startData.error || 'DeepSeek 全库整理失败');
+
+  let job = startData.job as MetadataAnalyzeJob;
+  onProgress?.(job);
+
+  while (job.status === 'queued' || job.status === 'running') {
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const progressResponse = await fetch(`/api/metadata/analyze-batch/jobs/${job.id}`);
+    const progressData = await progressResponse.json();
+    if (!progressResponse.ok) throw new Error(progressData.error || 'DeepSeek 整理进度读取失败');
+    job = progressData.job;
+    onProgress?.(job);
+  }
+
+  if (job.status === 'failed') throw new Error(job.error || 'DeepSeek 全库整理失败');
+  return { job, albums: await fetchAlbums() };
 }
 
 export async function generateAlbumCover(albumId: string): Promise<Album> {

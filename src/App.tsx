@@ -21,6 +21,7 @@ import {
   analyzeAlbumMetadata,
   analyzeLibraryMetadata,
   createFavoriteFolder,
+  estimateLibraryMetadata,
   createCategory,
   fetchAlbumRecommendations,
   fetchAlbums,
@@ -36,7 +37,20 @@ import {
   updateAlbumMetadata,
   updateProfileAvatar
 } from './api';
-import type { Album, AlbumRecommendation, AppView, Category, Episode, FavoriteFolder, MediaKind, NasConfig } from './types';
+import type {
+  Album,
+  AlbumRecommendation,
+  AppView,
+  Category,
+  Episode,
+  FavoriteFolder,
+  MediaKind,
+  MetadataAnalyzeEstimate,
+  MetadataAnalyzeJob,
+  MetadataAnalyzeMode,
+  NasConfig,
+  SearchMode
+} from './types';
 
 const tabs: Array<{ kind: MediaKind; label: string }> = [
   { kind: 'drama', label: '广播剧' },
@@ -75,6 +89,10 @@ const emptyMetadataFilters: MetadataFilters = {
   finishStatus: '',
   genres: []
 };
+const searchModeOptions: Array<{ mode: SearchMode; label: string; placeholder: string }> = [
+  { mode: 'text', label: '搜剧名', placeholder: '搜本地剧集、书名、课程' },
+  { mode: 'cv', label: '搜 CV', placeholder: '输入配音演员 / CV 名字' }
+];
 
 const relationshipOptions = ['言情', '耽美', '百合', '无 CP', '群像'];
 const audienceOptions = ['男女', '男男', '女女', '群像'];
@@ -175,21 +193,23 @@ export function App() {
   const [nas, setNas] = useState<NasConfig | null>(null);
   const [selectedAlbum, setSelectedAlbum] = useState<Album | null>(null);
   const [query, setQuery] = useState('');
+  const [searchMode, setSearchMode] = useState<SearchMode>('text');
   const [nasRoot, setNasRoot] = useState('');
   const [notice, setNotice] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [playerAlbum, setPlayerAlbum] = useState<Album | null>(null);
   const [playerEpisode, setPlayerEpisode] = useState<Episode | null>(null);
+  const [metadataAnalyzeJob, setMetadataAnalyzeJob] = useState<MetadataAnalyzeJob | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [audioTime, setAudioTime] = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  async function load(kind = activeKind, q = query, category = activeCategory) {
+  async function load(kind = activeKind, q = query, category = activeCategory, mode = searchMode) {
     setIsLoading(true);
     try {
       const [nextAlbums, nextNas, nextCategories, nextFavoriteFolders] = await Promise.all([
-        fetchAlbums(kind, q, category),
+        fetchAlbums(kind, q, category, mode),
         fetchNas(),
         fetchCategories(),
         fetchFavoriteFolders()
@@ -211,8 +231,8 @@ export function App() {
   }
 
   useEffect(() => {
-    void load(activeKind, query, activeCategory);
-  }, [activeKind, activeCategory]);
+    void load(activeKind, query, activeCategory, searchMode);
+  }, [activeKind, activeCategory, searchMode]);
 
   const continueAlbum = useMemo(() => albums.find((album) => album.status === 'listening') || albums[0], [albums]);
   const currentEpisode = continueAlbum?.episodes.find((episode) => (episode.progress || 0) < 100) || continueAlbum?.episodes[0];
@@ -305,9 +325,26 @@ export function App() {
   async function handleSearch(nextQuery: string) {
     setQuery(nextQuery);
     if (view === 'search') {
-      const result = await fetchAlbums(undefined, nextQuery, activeCategory);
+      const result = await fetchAlbums(undefined, nextQuery, activeCategory, searchMode);
       setAlbums(result);
     }
+  }
+
+  async function handleSearchModeChange(mode: SearchMode) {
+    setSearchMode(mode);
+    if (view === 'search') {
+      const result = await fetchAlbums(undefined, query, activeCategory, mode);
+      setAlbums(result);
+    }
+  }
+
+  async function handleSearchCv(cv: string) {
+    setSearchMode('cv');
+    setQuery(cv);
+    setSelectedAlbum(null);
+    setView('search');
+    const result = await fetchAlbums(undefined, cv, activeCategory, 'cv');
+    setAlbums(result);
   }
 
   async function handleAddCategory(name: string) {
@@ -369,7 +406,7 @@ export function App() {
       setAlbums((current) => current.map((album) => (album.id === albumId ? result.album : album)));
       setSelectedAlbum((current) => (current?.id === albumId ? result.album : current));
       setPlayerAlbum((current) => (current?.id === albumId ? result.album : current));
-      setNotice(result.metadata.needsReview ? 'DeepSeek 已保存资料，你可以随时手动调整' : 'DeepSeek 已保存资料');
+      setNotice(result.metadata.needsReview ? 'DeepSeek 已整理，已加入待确认' : 'DeepSeek 已保存资料');
       return result;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'DeepSeek 资料整理失败');
@@ -377,14 +414,14 @@ export function App() {
     }
   }
 
-  async function handleAnalyzeLibraryMetadata() {
+  async function handleAnalyzeLibraryMetadata(mode: MetadataAnalyzeMode = 'all') {
     try {
       setNotice('DeepSeek 正在整理全部广播剧，这会需要一点时间...');
-      const result = await analyzeLibraryMetadata();
+      const result = await analyzeLibraryMetadata(mode, setMetadataAnalyzeJob);
       setAlbums(result.albums.filter((album) => album.kind === activeKind));
       setSelectedAlbum((current) => (current ? result.albums.find((album) => album.id === current.id) || current : current));
       setPlayerAlbum((current) => (current ? result.albums.find((album) => album.id === current.id) || current : current));
-      setNotice(`全库整理完成：成功 ${result.updated} 部，失败 ${result.failed} 部`);
+      setNotice(`全库整理完成：成功 ${result.job.updated} 部，失败 ${result.job.failed} 部`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'DeepSeek 全库整理失败');
     }
@@ -412,7 +449,7 @@ export function App() {
               value={query}
               onChange={(event) => void handleSearch(event.target.value)}
               onFocus={() => setView('search')}
-              placeholder="搜本地剧集、书名、课程"
+              placeholder={searchModeOptions.find((item) => item.mode === searchMode)?.placeholder || '搜本地剧集、书名、课程'}
             />
           </div>
           <div className={nas?.connected ? 'nas-chip online' : 'nas-chip'}>
@@ -455,7 +492,15 @@ export function App() {
             <FilesView nas={nas} nasRoot={nasRoot} setNasRoot={setNasRoot} onSave={handleSaveNas} onScan={handleScan} onOpen={setSelectedAlbum} />
           ) : null}
           {view === 'search' ? (
-            <SearchView query={query} setQuery={(value) => void handleSearch(value)} albums={albums} onOpen={setSelectedAlbum} onPlay={playAlbum} />
+            <SearchView
+              query={query}
+              setQuery={(value) => void handleSearch(value)}
+              searchMode={searchMode}
+              setSearchMode={(mode) => void handleSearchModeChange(mode)}
+              albums={albums}
+              onOpen={setSelectedAlbum}
+              onPlay={playAlbum}
+            />
           ) : null}
           {view === 'me' ? (
             <MeView
@@ -463,6 +508,7 @@ export function App() {
               albums={albums}
               categories={categories}
               favoriteFolders={favoriteFolders}
+              metadataAnalyzeJob={metadataAnalyzeJob}
               onAddCategory={handleAddCategory}
               onAnalyzeLibrary={handleAnalyzeLibraryMetadata}
               onOpen={setSelectedAlbum}
@@ -484,6 +530,7 @@ export function App() {
             onAddFavorite={handleAddFavorite}
             onRemoveFavorite={handleRemoveFavorite}
             onPlay={playAlbum}
+            onSearchCv={handleSearchCv}
             currentEpisodeId={displayedPlayerEpisode?.id}
             isPlaying={isPlaying}
             audioTime={audioTime}
@@ -502,6 +549,12 @@ export function App() {
             aria-label={isPlaying ? '暂停当前播放' : '播放当前项目'}
             onClick={togglePlay}
           >
+            <span className="nav-player-fox" aria-hidden="true">
+              <span className="fox-ear left" />
+              <span className="fox-ear right" />
+              <span className="fox-face" />
+            </span>
+            <span className="nav-player-tail" aria-hidden="true" />
             <span className="nav-player-cover" style={{ background: coverBackground(displayedPlayerAlbum?.cover) }} />
             <span className="nav-player-glyph">
               {isPlaying ? <Pause size={15} fill="currentColor" /> : <Play size={15} fill="currentColor" />}
@@ -1156,31 +1209,57 @@ function FilesView({
 function SearchView({
   query,
   setQuery,
+  searchMode,
+  setSearchMode,
   albums,
   onOpen,
   onPlay
 }: {
   query: string;
   setQuery: (value: string) => void;
+  searchMode: SearchMode;
+  setSearchMode: (mode: SearchMode) => void;
   albums: Album[];
   onOpen: (album: Album) => void;
   onPlay: (album: Album, episode?: Episode) => void;
 }) {
+  const currentSearch = searchModeOptions.find((item) => item.mode === searchMode) || searchModeOptions[0];
+  const normalizedQuery = query.trim().replace(/\s+/g, '').toLowerCase();
+  const visibleAlbums =
+    searchMode === 'cv' && normalizedQuery
+      ? albums.filter((album) => (album.cast || []).some((cv) => cv.replace(/\s+/g, '').toLowerCase().includes(normalizedQuery)))
+      : albums;
+
   return (
     <section className="panel-page">
-      <SectionHeader title="本地搜索" subtitle="搜 NAS 索引，不走外部联网" />
+      <SectionHeader title={searchMode === 'cv' && query ? `${query} 参与的广播剧` : '本地搜索'} subtitle="搜 NAS 索引，不走外部联网" />
+      <div className="search-mode-tabs" aria-label="搜索模式">
+        {searchModeOptions.map((option) => (
+          <button key={option.mode} className={searchMode === option.mode ? 'active' : ''} onClick={() => setSearchMode(option.mode)}>
+            {option.label}
+          </button>
+        ))}
+      </div>
       <div className="large-search">
         <Search size={20} />
-        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="输入剧名、书名、课程名" />
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={currentSearch.placeholder} />
       </div>
       <div className="result-list">
-        {albums.map((album) => (
+        {visibleAlbums.map((album) => (
           <div key={album.id} className="result-row">
             <button className="result-main" onClick={() => onOpen(album)}>
               <span className="mini-cover" style={{ background: coverBackground(album.cover) }} />
               <span>
                 <strong>{album.title}</strong>
-                <small>{album.subtitle}</small>
+                <small>
+                  {searchMode === 'cv'
+                    ? `配音：${
+                        album.cast
+                          ?.filter((cv) => !normalizedQuery || cv.replace(/\s+/g, '').toLowerCase().includes(normalizedQuery))
+                          .join('、') || joinList(album.cast) || '待整理'
+                      }`
+                    : album.subtitle}
+                </small>
               </span>
             </button>
             <button className="inline-play" type="button" aria-label={`播放 ${album.title}`} onClick={() => onPlay(album)}>
@@ -1188,6 +1267,7 @@ function SearchView({
             </button>
           </div>
         ))}
+        {!visibleAlbums.length ? <div className="empty-state compact">{searchMode === 'cv' ? '没有找到这个 CV 参与的本地广播剧' : '没有搜到本地内容'}</div> : null}
       </div>
     </section>
   );
@@ -1198,6 +1278,7 @@ function MeView({
   albums,
   categories,
   favoriteFolders,
+  metadataAnalyzeJob,
   onAddCategory,
   onAnalyzeLibrary,
   onOpen
@@ -1206,8 +1287,9 @@ function MeView({
   albums: Album[];
   categories: Category[];
   favoriteFolders: FavoriteFolder[];
+  metadataAnalyzeJob: MetadataAnalyzeJob | null;
   onAddCategory: (name: string) => Promise<void>;
-  onAnalyzeLibrary: () => Promise<void>;
+  onAnalyzeLibrary: (mode?: MetadataAnalyzeMode) => Promise<void>;
   onOpen: (album: Album) => void;
 }) {
   const [categoryName, setCategoryName] = useState('');
@@ -1215,6 +1297,19 @@ function MeView({
   const [isSavingAvatar, setIsSavingAvatar] = useState(false);
   const [favoriteQuery, setFavoriteQuery] = useState('');
   const [activeFavoriteFolderId, setActiveFavoriteFolderId] = useState('all');
+  const [isAnalyzeDialogOpen, setIsAnalyzeDialogOpen] = useState(false);
+  const [selectedAnalyzeMode, setSelectedAnalyzeMode] = useState<MetadataAnalyzeMode>('missing-only');
+  const [metadataEstimate, setMetadataEstimate] = useState<MetadataAnalyzeEstimate | null>(null);
+  const [isEstimatingMetadata, setIsEstimatingMetadata] = useState(false);
+  const isAnalyzingLibrary = metadataAnalyzeJob?.status === 'queued' || metadataAnalyzeJob?.status === 'running';
+  const metadataAnalyzePercent = metadataAnalyzeJob?.total
+    ? Math.round((metadataAnalyzeJob.processed / metadataAnalyzeJob.total) * 100)
+    : 0;
+  const analyzeModeOptions: Array<{ mode: MetadataAnalyzeMode; title: string; note: string }> = [
+    { mode: 'missing-only', title: '只整理缺资料', note: '省钱，优先补简介、作者、配音' },
+    { mode: 'failed-only', title: '重试失败', note: '只重新处理上次失败的广播剧' },
+    { mode: 'all', title: '重新整理全部', note: '适合第一次建库或重做标签' }
+  ];
 
   useEffect(() => {
     fetchProfile()
@@ -1250,6 +1345,32 @@ function MeView({
     reader.readAsDataURL(file);
   }
 
+  async function openAnalyzeDialog(mode: MetadataAnalyzeMode = selectedAnalyzeMode) {
+    setSelectedAnalyzeMode(mode);
+    setIsAnalyzeDialogOpen(true);
+    setIsEstimatingMetadata(true);
+    try {
+      setMetadataEstimate(await estimateLibraryMetadata(mode));
+    } finally {
+      setIsEstimatingMetadata(false);
+    }
+  }
+
+  async function selectAnalyzeMode(mode: MetadataAnalyzeMode) {
+    setSelectedAnalyzeMode(mode);
+    setIsEstimatingMetadata(true);
+    try {
+      setMetadataEstimate(await estimateLibraryMetadata(mode));
+    } finally {
+      setIsEstimatingMetadata(false);
+    }
+  }
+
+  async function confirmAnalyzeLibrary() {
+    setIsAnalyzeDialogOpen(false);
+    await onAnalyzeLibrary(selectedAnalyzeMode);
+  }
+
   const myTools: Array<{ icon: SketchIconName; label: string; note: string }> = [
     { icon: 'nas', label: 'NAS 设置', note: '连接目录' },
     { icon: 'timer', label: '定时关闭', note: '睡前播放' },
@@ -1273,6 +1394,7 @@ function MeView({
       value.toLowerCase().includes(q)
     );
   });
+  const pendingAiAlbums = albums.filter((album) => album.aiMetaStatus === 'suggested');
 
   return (
     <section className="me-page">
@@ -1348,10 +1470,10 @@ function MeView({
       </section>
 
       <div className="me-tool-grid">
-        <button onClick={() => void onAnalyzeLibrary()}>
+        <button disabled={isAnalyzingLibrary} onClick={() => void openAnalyzeDialog()}>
           <SketchIcon name="settings" decorated />
           <strong>一键编辑</strong>
-          <span>DeepSeek 整理</span>
+          <span>{isAnalyzingLibrary ? '整理中' : 'DeepSeek 整理'}</span>
         </button>
         {myTools.map((tool) => (
           <button key={tool.label}>
@@ -1361,6 +1483,113 @@ function MeView({
           </button>
         ))}
       </div>
+
+      {metadataAnalyzeJob ? (
+        <section className="metadata-progress-card">
+          <div className="metadata-progress-head">
+            <strong>
+              {metadataAnalyzeJob.status === 'completed'
+                ? 'DeepSeek 整理完成'
+                : metadataAnalyzeJob.status === 'failed'
+                  ? 'DeepSeek 整理失败'
+                  : 'DeepSeek 正在整理'}
+            </strong>
+            <span>{metadataAnalyzePercent}%</span>
+          </div>
+          <div className="metadata-progress-bar">
+            <i style={{ width: `${metadataAnalyzePercent}%` }} />
+          </div>
+          <p>
+            {metadataAnalyzeJob.currentAlbumTitle
+              ? `正在整理：${metadataAnalyzeJob.currentAlbumTitle}`
+              : metadataAnalyzeJob.status === 'completed'
+                ? '本次全库整理已经结束。'
+                : metadataAnalyzeJob.error || '正在准备任务...'}
+          </p>
+          <div className="metadata-progress-stats">
+            <span>总数 {metadataAnalyzeJob.total}</span>
+            <span>已完成 {metadataAnalyzeJob.processed}</span>
+            <span>成功 {metadataAnalyzeJob.updated}</span>
+            <span>失败 {metadataAnalyzeJob.failed}</span>
+          </div>
+          {metadataAnalyzeJob.status === 'completed' && metadataAnalyzeJob.failed > 0 ? (
+            <button className="metadata-retry-button" onClick={() => void openAnalyzeDialog('failed-only')}>
+              重试失败项
+            </button>
+          ) : null}
+          {metadataAnalyzeJob.results.length ? (
+            <div className="metadata-result-list">
+              {metadataAnalyzeJob.results.slice(-8).reverse().map((result) => (
+                <button
+                  key={`${metadataAnalyzeJob.id}-${result.id}`}
+                  onClick={() => {
+                    const album = albums.find((item) => item.id === result.id);
+                    if (album) onOpen(album);
+                  }}
+                >
+                  <span className={result.ok ? (result.needsReview || result.aiMetaStatus === 'suggested' ? 'review' : 'ok') : 'fail'}>
+                    {result.ok ? (result.needsReview || result.aiMetaStatus === 'suggested' ? '待确认' : '成功') : '失败'}
+                  </span>
+                  <strong>{result.title}</strong>
+                  <small>{result.error || (result.needsReview || result.aiMetaStatus === 'suggested' ? '需要你检查资料' : '已保存')}</small>
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+
+      {isAnalyzeDialogOpen ? (
+        <div className="metadata-dialog" role="dialog" aria-label="DeepSeek 整理确认">
+          <div className="metadata-dialog-card">
+            <div className="metadata-dialog-head">
+              <strong>DeepSeek 整理</strong>
+              <button onClick={() => setIsAnalyzeDialogOpen(false)}>关闭</button>
+            </div>
+            <div className="metadata-mode-list">
+              {analyzeModeOptions.map((option) => (
+                <button
+                  key={option.mode}
+                  className={selectedAnalyzeMode === option.mode ? 'active' : ''}
+                  onClick={() => void selectAnalyzeMode(option.mode)}
+                >
+                  <strong>{option.title}</strong>
+                  <span>{option.note}</span>
+                </button>
+              ))}
+            </div>
+            <div className="metadata-estimate-box">
+              <span>预计整理</span>
+              <strong>{isEstimatingMetadata ? '计算中...' : `${metadataEstimate?.total ?? 0} 部`}</strong>
+              {metadataEstimate && metadataEstimate.totalBeforeLimit > metadataEstimate.total ? (
+                <small>本次最多处理 {metadataEstimate.limit} 部，剩余可下次继续。</small>
+              ) : (
+                <small>开始后会显示进度、结果和失败项。</small>
+              )}
+            </div>
+            <button className="metadata-confirm-button" disabled={isEstimatingMetadata || !metadataEstimate?.total} onClick={() => void confirmAnalyzeLibrary()}>
+              确认开始
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      <section className="ai-review-panel">
+        <SectionHeader title="AI 待确认" subtitle={`${pendingAiAlbums.length} 部`} />
+        <div className="ai-review-list">
+          {pendingAiAlbums.slice(0, 6).map((album) => (
+            <button key={album.id} onClick={() => onOpen(album)}>
+              <span className="mini-cover" style={{ background: coverBackground(album.cover) }} />
+              <span>
+                <strong>{album.title}</strong>
+                <small>{[album.author, album.cast?.[0], ...(album.genres || [])].filter(Boolean).slice(0, 3).join(' · ') || '资料需要你确认'}</small>
+              </span>
+              <em>确认</em>
+            </button>
+          ))}
+          {!pendingAiAlbums.length ? <p>暂时没有需要确认的 AI 资料。</p> : null}
+        </div>
+      </section>
 
       <div className="settings-card category-settings-card">
         <label htmlFor="category-name">分类设置</label>
@@ -1396,6 +1625,7 @@ function AlbumDrawer({
   onAddFavorite,
   onRemoveFavorite,
   onPlay,
+  onSearchCv,
   currentEpisodeId,
   isPlaying,
   audioTime,
@@ -1416,6 +1646,7 @@ function AlbumDrawer({
   onAddFavorite: (folderId: string, albumId: string) => Promise<void>;
   onRemoveFavorite: (folderId: string, albumId: string) => Promise<void>;
   onPlay: (album: Album, episode?: Episode) => void;
+  onSearchCv: (cv: string) => void;
   currentEpisodeId?: string;
   isPlaying: boolean;
   audioTime: number;
@@ -1689,7 +1920,7 @@ function AlbumDrawer({
               {album.aiMetaStatus ? (
                 <small className="ai-meta-status">
                   {album.aiMetaStatus === 'suggested'
-                    ? 'DeepSeek 已生成建议，确认后保存'
+                    ? 'DeepSeek 已整理，建议你确认作者、配音和简介'
                     : album.aiMetaStatus === 'failed'
                       ? 'DeepSeek 上次整理失败'
                       : album.aiMetaStatus === 'saved'
@@ -1710,7 +1941,17 @@ function AlbumDrawer({
                 </div>
                 <div>
                   <span>配音</span>
-                  <strong>{album.cast?.length ? joinList(album.cast) : '未填写'}</strong>
+                  {album.cast?.length ? (
+                    <div className="cast-link-list">
+                      {album.cast.map((cv) => (
+                        <button key={cv} onClick={() => onSearchCv(cv)}>
+                          {cv}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <strong>未填写</strong>
+                  )}
                 </div>
                 <div>
                   <span>主角组合</span>

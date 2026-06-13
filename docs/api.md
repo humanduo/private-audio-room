@@ -163,7 +163,11 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com/chat/completions
 }
 ```
 
+如果 DeepSeek 返回 `needsReview=true`，后端会保存资料并把专辑 `aiMetaStatus` 标记为 `suggested`。前端会在 `我的 -> AI 待确认` 展示这些广播剧，用户手动保存资料后状态变为 `saved`。
+
 ## DeepSeek 一键整理全部广播剧
+
+前端入口在 `我的 -> 一键编辑`。点击后会先弹出确认框，用户可以选择整理模式，再开始任务。
 
 ```http
 POST /api/metadata/analyze-batch
@@ -186,7 +190,7 @@ Content-Type: application/json
 - `mode=missing-only` 只整理缺简介、缺标签或缺配音的广播剧。
 - `mode=failed-only` 只重试上次失败的广播剧。
 - 默认一次最多 50 部，可通过 `AI_METADATA_BATCH_LIMIT` 调整。
-- 前端 `我的 -> 一键编辑` 会调用这个接口。
+- 前端默认使用带进度的任务接口；这个同步接口保留给脚本或调试使用。
 
 响应：
 
@@ -198,6 +202,92 @@ Content-Type: application/json
   "albums": []
 }
 ```
+
+### 带进度的一键整理任务
+
+前端优先使用任务接口，方便展示整理进度。
+
+预估本次会整理多少部：
+
+```http
+POST /api/metadata/analyze-batch/estimate
+Content-Type: application/json
+```
+
+```json
+{
+  "kind": "drama",
+  "mode": "missing-only",
+  "limit": 50
+}
+```
+
+响应：
+
+```json
+{
+  "kind": "drama",
+  "mode": "missing-only",
+  "modeLabel": "只整理缺资料",
+  "limit": 50,
+  "total": 12,
+  "totalBeforeLimit": 12
+}
+```
+
+启动任务：
+
+```http
+POST /api/metadata/analyze-batch/jobs
+Content-Type: application/json
+```
+
+```json
+{
+  "kind": "drama",
+  "mode": "all",
+  "limit": 50
+}
+```
+
+查询进度：
+
+```http
+GET /api/metadata/analyze-batch/jobs/:id
+```
+
+响应：
+
+```json
+{
+  "job": {
+    "id": "meta-xxxx",
+    "status": "running",
+    "total": 35,
+    "processed": 12,
+    "updated": 10,
+    "failed": 2,
+    "currentAlbumTitle": "今日离港",
+    "results": [
+      {
+        "id": "album-id",
+        "title": "今日离港",
+        "ok": true,
+        "needsReview": true,
+        "aiMetaStatus": "suggested"
+      }
+    ]
+  }
+}
+```
+
+前端会展示：
+
+- 整理模式：只整理缺资料、重试失败、重新整理全部。
+- 整理前确认：显示本次预计处理数量。
+- 任务进度：总数、已完成、成功、失败、当前剧名。
+- 任务结果列表：最近整理的作品，区分成功、待确认、失败。
+- 失败重试：任务完成后如果有失败项，可以直接用 `failed-only` 重试。
 
 ## 保存专辑资料
 

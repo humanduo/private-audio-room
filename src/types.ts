@@ -1,4 +1,5 @@
 export type MediaKind = 'drama' | 'book' | 'course';
+export type SearchMode = 'text' | 'cv';
 
 export type Episode = {
   id: string;
@@ -68,6 +69,34 @@ export type AlbumRecommendation = {
   album: Album;
   score: number;
   reasons: string[];
+};
+
+export type MetadataAnalyzeJob = {
+  id: string;
+  status: 'queued' | 'running' | 'completed' | 'failed';
+  kind: MediaKind;
+  mode: string;
+  limit: number;
+  total: number;
+  processed: number;
+  updated: number;
+  failed: number;
+  currentAlbumTitle: string;
+  results: Array<{ id: string; title: string; ok: boolean; error?: string; needsReview?: boolean; aiMetaStatus?: string }>;
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+};
+
+export type MetadataAnalyzeMode = 'missing-only' | 'failed-only' | 'all';
+
+export type MetadataAnalyzeEstimate = {
+  kind: MediaKind;
+  mode: MetadataAnalyzeMode;
+  modeLabel: string;
+  limit: number;
+  total: number;
+  totalBeforeLimit: number;
 };
 
 export type UserProfile = {

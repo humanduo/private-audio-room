@@ -33,6 +33,25 @@ type AiMetadata = {
   confidence: number;
   needsReview: boolean;
 };
+type MetadataAnalyzeJobStatus = 'queued' | 'running' | 'completed' | 'failed';
+type MetadataAnalyzeJobResult = { id: string; title: string; ok: boolean; error?: string; needsReview?: boolean; aiMetaStatus?: string };
+type MetadataAnalyzeJob = {
+  id: string;
+  status: MetadataAnalyzeJobStatus;
+  kind: MediaKind;
+  mode: string;
+  limit: number;
+  total: number;
+  processed: number;
+  updated: number;
+  failed: number;
+  currentAlbumTitle: string;
+  results: MetadataAnalyzeJobResult[];
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+};
+const metadataAnalyzeJobs = new Map<string, MetadataAnalyzeJob>();
 
 function normalizeState(state: Partial<AppState>): AppState {
   const defaultAlbumMap = new Map(mockAlbums.map((album) => [album.id, album]));
@@ -188,22 +207,96 @@ function extractJsonObject(text: string) {
   }
 }
 
+function decodeHtml(value: string) {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ');
+}
+
+function cleanHtmlText(value: string) {
+  return decodeHtml(value.replace(/<[^>]*>/g, ' '))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function decodeDuckDuckGoUrl(value: string) {
+  const url = decodeHtml(value);
+  try {
+    const parsed = new URL(url.startsWith('//') ? `https:${url}` : url);
+    const target = parsed.searchParams.get('uddg');
+    return target ? decodeURIComponent(target) : parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+function metadataSearchQuery(album: Album) {
+  return uniqueStrings([
+    album.title.replace(/\s+第[一二三四五六七八九十0-9]+季$/i, ''),
+    album.title,
+    album.subtitle
+  ])
+    .filter((item) => item && !['广播剧', '有声书', '网课'].includes(item))
+    .slice(0, 2)
+    .join(' ');
+}
+
+async function searchAlbumMetadata(album: Album) {
+  if (process.env.AI_METADATA_ALLOW_WEB_SEARCH === 'false') return [];
+
+  const query = `${metadataSearchQuery(album)} 广播剧 原著 配音演员 CV 简介`;
+  if (!query.trim()) return [];
+
+  const response = await fetch(`https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
+    headers: { 'User-Agent': 'Mozilla/5.0 PrivateAudioRoom/0.1' }
+  });
+  if (!response.ok) throw new Error(`metadata search failed: ${response.status}`);
+
+  const html = await response.text();
+  return [...html.matchAll(/<a rel="nofollow" class="result__a" href="([^"]+)">([\s\S]*?)<\/a>[\s\S]*?<a class="result__snippet"[\s\S]*?>([\s\S]*?)<\/a>/g)]
+    .slice(0, 6)
+    .map((match) => ({
+      title: cleanHtmlText(match[2]).slice(0, 120),
+      snippet: cleanHtmlText(match[3]).slice(0, 500),
+      url: decodeDuckDuckGoUrl(match[1]).slice(0, 300)
+    }))
+    .filter((item) => item.title || item.snippet);
+}
+
+async function safeSearchAlbumMetadata(album: Album) {
+  try {
+    return await searchAlbumMetadata(album);
+  } catch {
+    return [];
+  }
+}
+
 async function analyzeAlbumMetadataWithDeepSeek(album: Album) {
   const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) throw new Error('DEEPSEEK_API_KEY is not configured');
 
   const model = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
   const baseUrl = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/chat/completions';
-  const episodeTitles = album.episodes.slice(0, 40).map((episode, index) => `${index + 1}. ${episode.title}`).join('\n');
+  const searchResults = await safeSearchAlbumMetadata(album);
+  const searchContext = searchResults.length
+    ? searchResults.map((item, index) => `${index + 1}. ${item.title}\n摘要：${item.snippet}\n来源：${item.url}`).join('\n\n')
+    : '没有搜索到可靠公开摘要。';
   const prompt = [
-    '你是一个私人 NAS 广播剧资料整理助手。请根据本地文件信息推断广播剧元数据。',
-    '不要联网，不要编造确定信息；不确定时留空或降低 confidence，并设置 needsReview=true。',
+    '你是一个私人 NAS 广播剧资料整理助手。请根据“剧名/文件夹名”和“公开搜索摘要”整理广播剧元数据。',
+    '不要根据分集标题推断整部剧资料。作者、配音演员必须优先来自公开搜索摘要；不确定时留空或降低 confidence，并设置 needsReview=true。',
+    'summary 必须尽量填写：如果公开摘要里有简介，请改写成 60-140 字中文简介；如果公开摘要很少，可以根据剧名和已有简介生成保守简介，并设置 needsReview=true。',
     '只返回 JSON，不要 Markdown，不要解释。',
     '',
     '允许的 relationship：言情、耽美、百合、无 CP、群像、空字符串。',
     '允许的 audience：男女、男男、女女、群像、空字符串。',
     '允许的 finishStatus：已完结、连载中、未知。',
     'genres 用短标签，例如：现代、古风、悬疑、恐怖、刑侦、甜宠、虐恋、权谋、无限流、校园、娱乐圈、修仙、治愈、强强。',
+    'cast 只写 CV/配音演员/主播姓名，不要写制作组、工作室、平台名。',
     '',
     `标题：${album.title}`,
     `副标题：${album.subtitle}`,
@@ -211,7 +304,8 @@ async function analyzeAlbumMetadataWithDeepSeek(album: Album) {
     `当前标签：${[...(album.tags || []), ...(album.genres || [])].join('、')}`,
     `当前简介：${album.summary || album.description || ''}`,
     `总集数：${album.totalEpisodes}`,
-    `分集标题：\n${episodeTitles}`,
+    '',
+    `公开搜索摘要：\n${searchContext}`,
     '',
     '返回格式：',
     '{"author":"","cast":[],"summary":"","genres":[],"relationship":"","audience":"","finishStatus":"未知","confidence":0.5,"needsReview":true}'
@@ -259,7 +353,7 @@ function applyAiMetadataToAlbum(album: Album, metadata: AiMetadata): Album {
     finishStatus: metadata.finishStatus || album.finishStatus,
     tags: nextTags.length ? nextTags : album.tags,
     updatedAt: '刚刚整理',
-    aiMetaStatus: 'saved',
+    aiMetaStatus: metadata.needsReview ? 'suggested' : 'saved',
     aiMetaUpdatedAt: new Date().toISOString()
   };
 }
@@ -338,6 +432,104 @@ function getAlbumRecommendations(album: Album, albums: Album[], limit = 6) {
     .filter((recommendation): recommendation is AlbumRecommendation => Boolean(recommendation))
     .sort((a, b) => b.score - a.score || b.album.progress - a.album.progress || a.album.title.localeCompare(b.album.title, 'zh-Hans-CN'))
     .slice(0, limit);
+}
+
+function selectMetadataAnalyzeCandidates(state: AppState, kind: MediaKind, mode: string, limit: number) {
+  return state.albums
+    .map((album, index) => ({ album, index }))
+    .filter(({ album }) => album.kind === kind)
+    .filter(({ album }) => {
+      if (mode === 'failed-only') return album.aiMetaStatus === 'failed';
+      if (mode === 'missing-only') return !album.summary || !album.genres?.length || !album.cast?.length;
+      return true;
+    })
+    .slice(0, limit);
+}
+
+function metadataAnalyzeModeLabel(mode: string) {
+  if (mode === 'missing-only') return '只整理缺资料';
+  if (mode === 'failed-only') return '重试失败';
+  return '重新整理全部';
+}
+
+function updateMetadataAnalyzeJob(jobId: string, patch: Partial<MetadataAnalyzeJob>) {
+  const current = metadataAnalyzeJobs.get(jobId);
+  if (!current) return null;
+  const next = { ...current, ...patch };
+  metadataAnalyzeJobs.set(jobId, next);
+  return next;
+}
+
+async function runMetadataAnalyzeJob(jobId: string) {
+  const job = metadataAnalyzeJobs.get(jobId);
+  if (!job) return;
+
+  if (!process.env.DEEPSEEK_API_KEY) {
+    updateMetadataAnalyzeJob(jobId, {
+      status: 'failed',
+      error: 'DEEPSEEK_API_KEY is not configured',
+      finishedAt: nowIso()
+    });
+    return;
+  }
+
+  updateMetadataAnalyzeJob(jobId, { status: 'running' });
+  const state = readState();
+  const candidates = selectMetadataAnalyzeCandidates(state, job.kind, job.mode, job.limit);
+  updateMetadataAnalyzeJob(jobId, { total: candidates.length });
+
+  for (const { album, index } of candidates) {
+    updateMetadataAnalyzeJob(jobId, { currentAlbumTitle: album.title });
+    try {
+      const metadata = await analyzeAlbumMetadataWithDeepSeek(album);
+      state.albums[index] = applyAiMetadataToAlbum(state.albums[index], metadata);
+      writeState(state);
+      const current = metadataAnalyzeJobs.get(jobId);
+      if (!current) return;
+      updateMetadataAnalyzeJob(jobId, {
+        processed: current.processed + 1,
+        updated: current.updated + 1,
+        results: [
+          ...current.results,
+          {
+            id: album.id,
+            title: album.title,
+            ok: true,
+            needsReview: metadata.needsReview,
+            aiMetaStatus: state.albums[index].aiMetaStatus
+          }
+        ]
+      });
+    } catch (error) {
+      state.albums[index] = {
+        ...state.albums[index],
+        aiMetaStatus: 'failed',
+        aiMetaUpdatedAt: new Date().toISOString()
+      };
+      writeState(state);
+      const current = metadataAnalyzeJobs.get(jobId);
+      if (!current) return;
+      updateMetadataAnalyzeJob(jobId, {
+        processed: current.processed + 1,
+        failed: current.failed + 1,
+        results: [
+          ...current.results,
+          {
+            id: album.id,
+            title: album.title,
+            ok: false,
+            error: error instanceof Error ? error.message : 'DeepSeek metadata analysis failed'
+          }
+        ]
+      });
+    }
+  }
+
+  updateMetadataAnalyzeJob(jobId, {
+    status: 'completed',
+    currentAlbumTitle: '',
+    finishedAt: nowIso()
+  });
 }
 
 function mergeManualMetadata(scanned: Album[], existing: Album[]) {
@@ -816,28 +1008,31 @@ app.get('/api/config', (_req, res) => {
 app.get('/api/albums', (req, res) => {
   const kind = req.query.kind as MediaKind | undefined;
   const query = String(req.query.q || '').trim().toLowerCase();
+  const searchMode = String(req.query.searchMode || 'text');
   const state = readState();
   let albums = state.albums;
 
   if (kind) albums = albums.filter((album) => album.kind === kind);
   if (query) {
     albums = albums.filter((album) => {
-      return [
-        album.title,
-        album.subtitle,
-        album.creator,
-        album.description,
-        album.author || '',
-        album.summary || '',
-        album.relationship || '',
-        album.audience || '',
-        album.finishStatus || '',
-        ...(album.cast || []),
-        ...(album.genres || []),
-        ...album.tags
-      ].some((value) =>
-        value.toLowerCase().includes(query)
-      );
+      const values =
+        searchMode === 'cv'
+          ? album.cast || []
+          : [
+              album.title,
+              album.subtitle,
+              album.creator,
+              album.description,
+              album.author || '',
+              album.summary || '',
+              album.relationship || '',
+              album.audience || '',
+              album.finishStatus || '',
+              ...(album.cast || []),
+              ...(album.genres || []),
+              ...album.tags
+            ];
+      return values.some((value) => value.toLowerCase().replace(/\s+/g, '').includes(query.replace(/\s+/g, '')));
     });
   }
 
@@ -930,15 +1125,7 @@ app.post('/api/metadata/analyze-batch', async (req, res) => {
   const mode = String(req.body?.mode || 'all');
   const limit = Math.max(1, Math.min(200, Number(req.body?.limit || process.env.AI_METADATA_BATCH_LIMIT || 50)));
   const state = readState();
-  const candidates = state.albums
-    .map((album, index) => ({ album, index }))
-    .filter(({ album }) => album.kind === kind)
-    .filter(({ album }) => {
-      if (mode === 'failed-only') return album.aiMetaStatus === 'failed';
-      if (mode === 'missing-only') return !album.summary || !album.genres?.length || !album.cast?.length;
-      return true;
-    })
-    .slice(0, limit);
+  const candidates = selectMetadataAnalyzeCandidates(state, kind, mode, limit);
 
   const results: Array<{ id: string; title: string; ok: boolean; error?: string }> = [];
   for (const { album, index } of candidates) {
@@ -964,6 +1151,58 @@ app.post('/api/metadata/analyze-batch', async (req, res) => {
     failed: results.filter((result) => !result.ok).length,
     results
   });
+});
+
+app.post('/api/metadata/analyze-batch/jobs', (req, res) => {
+  if (!process.env.DEEPSEEK_API_KEY) {
+    return res.status(400).json({ error: 'DEEPSEEK_API_KEY is not configured' });
+  }
+
+  const kind = (req.body?.kind || 'drama') as MediaKind;
+  const mode = String(req.body?.mode || 'all');
+  const limit = Math.max(1, Math.min(200, Number(req.body?.limit || process.env.AI_METADATA_BATCH_LIMIT || 50)));
+  const total = selectMetadataAnalyzeCandidates(readState(), kind, mode, limit).length;
+  const job: MetadataAnalyzeJob = {
+    id: `meta-${stableId(`${Date.now()}-${Math.random()}`, 16)}`,
+    status: 'queued',
+    kind,
+    mode,
+    limit,
+    total,
+    processed: 0,
+    updated: 0,
+    failed: 0,
+    currentAlbumTitle: '',
+    results: [],
+    startedAt: nowIso()
+  };
+
+  metadataAnalyzeJobs.set(job.id, job);
+  setTimeout(() => {
+    void runMetadataAnalyzeJob(job.id);
+  }, 0);
+  res.status(202).json({ job });
+});
+
+app.post('/api/metadata/analyze-batch/estimate', (req, res) => {
+  const kind = (req.body?.kind || 'drama') as MediaKind;
+  const mode = String(req.body?.mode || 'all');
+  const limit = Math.max(1, Math.min(200, Number(req.body?.limit || process.env.AI_METADATA_BATCH_LIMIT || 50)));
+  const totalBeforeLimit = selectMetadataAnalyzeCandidates(readState(), kind, mode, Number.MAX_SAFE_INTEGER).length;
+  res.json({
+    kind,
+    mode,
+    modeLabel: metadataAnalyzeModeLabel(mode),
+    limit,
+    total: Math.min(totalBeforeLimit, limit),
+    totalBeforeLimit
+  });
+});
+
+app.get('/api/metadata/analyze-batch/jobs/:id', (req, res) => {
+  const job = metadataAnalyzeJobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Metadata analyze job not found' });
+  res.json({ job });
 });
 
 app.post('/api/albums/:id/cover/generate', async (req, res) => {
