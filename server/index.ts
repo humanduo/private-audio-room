@@ -96,6 +96,9 @@ type AiMetadata = {
   sources: string[];
   confidence: number;
   needsReview: boolean;
+  titleMatched: boolean;
+  hasDramaSource: boolean;
+  sourceQuality: string[];
 };
 type SearchResult = {
   title: string;
@@ -425,7 +428,10 @@ function aiMetadataFromBody(body: Record<string, unknown>): AiMetadata {
     finishStatus: normalizeFinishStatus(stringField(metadataValue(body, ['finishStatus', '完结状态', '状态']), 30)),
     sources: arrayField(metadataValue(body, ['sources', '来源', 'sourceUrls']), 12),
     confidence: Math.max(0, Math.min(1, Number(body.confidence || 0))),
-    needsReview: body.needsReview !== false
+    needsReview: body.needsReview !== false,
+    titleMatched: false,
+    hasDramaSource: false,
+    sourceQuality: []
   };
 }
 
@@ -589,6 +595,69 @@ function seriesTitleForMetadata(title: string) {
     .trim();
 }
 
+function normalizeMetadataSearchTitle(title: string) {
+  return seriesTitleForMetadata(title)
+    .replace(/[\s·・_-]*第[一二三四五六七八九十两\d]+季(?:[（(][上下][）)])?/gu, '')
+    .replace(/[\s·・_-]*(上季|下季|完结|广播剧|有声书)/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeTitleForMatch(value: string) {
+  return normalizeMetadataSearchTitle(value)
+    .replace(/[《》"'“”‘’（）()[\]【】\s·・._-]/g, '')
+    .toLowerCase();
+}
+
+function isTitleMatched(album: Album, metadata: AiMetadata) {
+  const expected = normalizeTitleForMatch(album.title);
+  const actual = normalizeTitleForMatch(metadata.title);
+  if (!expected || !actual) return false;
+  if (actual.length < 4 && expected !== actual) return false;
+  return actual.includes(expected) || expected.includes(actual);
+}
+
+function sourceText(result: SearchResult) {
+  return `${result.title} ${result.summary || ''} ${result.snippet || ''} ${result.url}`.toLowerCase();
+}
+
+function isLowQualitySource(result: SearchResult) {
+  const text = sourceText(result);
+  return /盗文|笔趣阁|小说网|漫画|无弹窗|全文阅读|txt下载|聚合|采集|章节目录/i.test(text);
+}
+
+function isHighQualitySource(result: SearchResult) {
+  const text = sourceText(result);
+  return (
+    /missevan|猫耳|manbo|漫播|fanqie|饭角|music\.163|网易云音乐|ximalaya|喜马拉雅|douban|豆瓣|官方微博|官博|官方发布|完整制作组|制作组|配音组/i.test(text) &&
+    !isLowQualitySource(result)
+  );
+}
+
+function isDramaRelatedSource(result: SearchResult) {
+  const text = sourceText(result);
+  return /广播剧|有声剧|猫耳|漫播|饭角|网易云音乐|喜马拉雅|主役|cv|配音|制作组|剧组|原著/i.test(text) && !isLowQualitySource(result);
+}
+
+function extractAuthorFromSearchResults(results: SearchResult[]) {
+  for (const result of results) {
+    const text = `${result.title} ${result.summary || ''} ${result.snippet || ''}`;
+    const match = text.match(/(?:原著作者|原著|原作|作者)\s*[:：]\s*([^\s，,。；;、｜|《》【】()[\]（）]{2,20})/);
+    if (match?.[1] && !/广播剧|猫耳|漫播|饭角|网易云音乐|喜马拉雅|制作组|工作室/.test(match[1])) return match[1].trim();
+  }
+  return '';
+}
+
+function extractPlatformFromSearchResults(results: SearchResult[]) {
+  const text = results.map(sourceText).join(' ');
+  if (/missevan|猫耳/.test(text)) return '猫耳 FM';
+  if (/manbo|漫播/.test(text)) return '漫播';
+  if (/fanqie|饭角/.test(text)) return '饭角';
+  if (/music\.163|网易云音乐/.test(text)) return '网易云音乐';
+  if (/ximalaya|喜马拉雅/.test(text)) return '喜马拉雅';
+  return '';
+}
+
 async function searchMetadataQuery(query: string) {
   const headers = {
     'User-Agent': 'Mozilla/5.0 PrivateAudioRoom/0.1',
@@ -691,12 +760,14 @@ async function searchWithProvider(query: string, options: { maxResults?: number;
 }
 
 function albumSearchQueries(album: Album) {
-  const baseTitle = seriesTitleForMetadata(album.title) || album.title;
+  const baseTitle = normalizeMetadataSearchTitle(album.title) || album.title;
   return uniqueStrings([
     `${baseTitle} 广播剧`,
-    `${baseTitle} 广播剧 主役 CV`,
-    `${baseTitle} 广播剧 作者 猫耳FM 漫播 饭角`
-  ]).slice(0, 3);
+    `${baseTitle} 原著 配音`,
+    `${baseTitle} 猫耳`,
+    `${baseTitle} 漫播`,
+    `${baseTitle} 网易云音乐`
+  ]).slice(0, 2);
 }
 
 async function searchAlbumMetadata(album: Album) {
@@ -706,15 +777,18 @@ async function searchAlbumMetadata(album: Album) {
   const results: SearchResult[] = [];
   for (const query of queries) {
     results.push(...(await searchWithProvider(query)));
-    if (results.length >= searchMaxResults()) break;
+    if (results.some(isHighQualitySource) || results.length >= searchMaxResults()) break;
   }
   const seen = new Set<string>();
-  return results.filter((item) => {
-    const key = `${item.title}-${item.url}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  }).slice(0, searchMaxResults());
+  return results
+    .filter((item) => {
+      const key = `${item.title}-${item.url}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return !isLowQualitySource(item);
+    })
+    .sort((a, b) => Number(isHighQualitySource(b)) - Number(isHighQualitySource(a)))
+    .slice(0, searchMaxResults());
 }
 
 async function safeSearchAlbumMetadata(album: Album) {
@@ -730,7 +804,12 @@ async function analyzeAlbumMetadataWithDeepSeek(album: Album) {
   const searchResults = await safeSearchAlbumMetadata(album);
   if (!searchResults.length) throw new Error('没有真实搜索来源 sources，已停止 AI 自动整理，避免编造资料。');
   const searchContext = searchResults.length
-    ? searchResults.map((item, index) => `${index + 1}. ${item.title}\n摘要：${item.summary || item.snippet || ''}\n来源：${item.url}`).join('\n\n')
+    ? searchResults
+        .map(
+          (item, index) =>
+            `${index + 1}. ${item.title}\n质量：${isHighQualitySource(item) ? '高质量广播剧来源' : isDramaRelatedSource(item) ? '广播剧相关来源' : '普通来源'}\n摘要：${item.summary || item.snippet || ''}\n来源：${item.url}`
+        )
+        .join('\n\n')
     : '';
   const prompt = [
     '你是一个私人 NAS 广播剧资料整理助手。你只能根据下面提供的搜索结果整理资料，不得使用常识补全，不得编造。',
@@ -738,6 +817,15 @@ async function analyzeAlbumMetadataWithDeepSeek(album: Album) {
     'sources 必须来自搜索结果中的真实 url，不能创建新 URL。',
     '如果搜索结果不足以确认，请设置 needsReview=true，confidence 低于 0.7。',
     '只返回 JSON，不要 Markdown，不要解释。',
+    '',
+    '作者字段提取规则：作者、原著、原作、原著作者 都属于 author，不要因为字段名不是“作者”就忽略。',
+    '如果 sources 里出现“原著：玄笺”，author 必须填“玄笺”。',
+    '如果 sources 里出现“原著：漫漫何其多”，author 必须填“漫漫何其多”。',
+    '如果只看到平台、制作组、配音工作室，不要把它们当 author。',
+    '',
+    'summary 必须基于 sources 整理，控制在 80～180 个中文字符。',
+    'summary 不要只写一句泛泛而谈，要包含人物/关系/主要冲突或故事背景。',
+    '不确定剧情时不要编造，只写 sources 能支持的信息；sources 没有剧情信息就留空。',
     '',
     '允许的 relationship：言情、耽美、百合、无 CP、群像、空字符串。',
     '允许的 audience：男女、男男、女女、群像、空字符串。',
@@ -794,7 +882,20 @@ async function analyzeAlbumMetadataWithDeepSeek(album: Album) {
   const metadata = aiMetadataFromBody(extractJsonObject(content));
   const allowedSources = new Set(searchResults.map((item) => item.url));
   metadata.sources = metadata.sources.filter((source) => allowedSources.has(source));
+  const selectedResults = searchResults.filter((item) => metadata.sources.includes(item.url));
+  const evidenceResults = selectedResults.length ? selectedResults : searchResults;
+  metadata.author = metadata.author || extractAuthorFromSearchResults(evidenceResults);
+  metadata.platform = metadata.platform || extractPlatformFromSearchResults(evidenceResults);
+  metadata.titleMatched = isTitleMatched(album, metadata);
+  metadata.hasDramaSource = selectedResults.some(isDramaRelatedSource);
+  metadata.sourceQuality = selectedResults.map((item) =>
+    isHighQualitySource(item) ? 'high' : isDramaRelatedSource(item) ? 'drama-related' : 'ordinary'
+  );
   if (!metadata.sources.length) {
+    metadata.needsReview = true;
+    metadata.confidence = Math.min(metadata.confidence || 0, 0.69);
+  }
+  if (!metadata.titleMatched || !metadata.hasDramaSource) {
     metadata.needsReview = true;
     metadata.confidence = Math.min(metadata.confidence || 0, 0.69);
   }
@@ -836,7 +937,15 @@ function applyAiMetadataToAlbum(album: Album, metadata: AiMetadata, albums: Albu
 }
 
 function canAutoApplyMetadata(metadata: AiMetadata) {
-  return Boolean(metadata.sources.length && metadata.confidence >= 0.7 && (metadata.summary || metadata.author || metadata.cast.length));
+  const reliableFieldCount = Number(Boolean(metadata.author)) + Number(Boolean(metadata.platform)) + Number(metadata.cast.length > 0);
+  return Boolean(
+    metadata.sources.length &&
+      metadata.confidence >= 0.7 &&
+      metadata.titleMatched &&
+      metadata.hasDramaSource &&
+      reliableFieldCount >= 2 &&
+      (metadata.author || metadata.cast.length || metadata.platform)
+  );
 }
 
 function progressKey(relativePath: string, episodeId = '') {
@@ -915,6 +1024,9 @@ function metadataToPendingPatch(metadata: AiMetadata) {
     metadataSources: metadata.sources,
     confidence: metadata.confidence,
     sources: metadata.sources,
+    titleMatched: metadata.titleMatched,
+    hasDramaSource: metadata.hasDramaSource,
+    sourceQuality: metadata.sourceQuality,
     needsReview: true
   };
 }

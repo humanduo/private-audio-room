@@ -178,6 +178,14 @@ function albumChips(album: Album, limit = 4) {
   );
 }
 
+function sourceHost(source: string) {
+  try {
+    return new URL(source).hostname.replace(/^www\./, '');
+  } catch {
+    return '资料来源';
+  }
+}
+
 function activeEpisodeForAlbum(album?: Album | null) {
   if (!album) return undefined;
   return (
@@ -2092,7 +2100,7 @@ function MeView({
                 <div className="ai-pending-sources">
                   {(item.sources || []).slice(0, 3).map((source, index) => (
                     <a key={source} href={source} target="_blank" rel="noreferrer">
-                      来源 {index + 1}
+                      {sourceHost(source) || `来源 ${index + 1}`}
                     </a>
                   ))}
                   {!item.sources?.length ? <span>没有来源，不会自动写入</span> : null}
