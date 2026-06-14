@@ -101,6 +101,7 @@ export type MetadataAnalyzeEstimate = {
 
 export type UserProfile = {
   avatar: string;
+  cvAvatars?: Record<string, string>;
 };
 
 export type AppView = 'home' | 'files' | 'search' | 'me';

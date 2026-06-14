@@ -30,9 +30,11 @@ import {
   fetchNas,
   fetchProfile,
   generateAlbumCover,
+  refreshCvAvatars,
   removeAlbumFromFavoriteFolder,
   saveNas,
   scanNas,
+  updateEpisodeProgress,
   updateAlbumCover,
   updateAlbumMetadata,
   updateProfileAvatar
@@ -65,6 +67,7 @@ type SketchIconName =
   | 'me'
   | 'drama'
   | 'book'
+  | 'cv'
   | 'course'
   | 'category'
   | 'timer'
@@ -81,6 +84,16 @@ type MetadataFilters = {
   audience: string;
   finishStatus: string;
   genres: string[];
+};
+
+type HomePanel = MediaKind | 'cv';
+
+type CvProfile = {
+  name: string;
+  initial: string;
+  count: number;
+  albums: Album[];
+  cover?: string;
 };
 
 const emptyMetadataFilters: MetadataFilters = {
@@ -105,6 +118,8 @@ const navItems: Array<{ view: AppView; label: string; icon: SketchIconName }> = 
   { view: 'search', label: '搜索', icon: 'search' },
   { view: 'me', label: '我的', icon: 'me' }
 ];
+
+const favoriteCvStorageKey = 'private-audio-room.favorite-cvs';
 
 function kindLabel(kind: MediaKind) {
   return tabs.find((tab) => tab.kind === kind)?.label || '内容';
@@ -141,10 +156,39 @@ function albumSummary(album: Album) {
 }
 
 function albumChips(album: Album, limit = 4) {
-  return [...new Set([album.finishStatus, album.relationship, ...(album.genres || []), ...(album.tags || [])].filter(Boolean) as string[])].slice(
+  return [...new Set([album.finishStatus, album.relationship, album.audience, ...(album.genres || []), ...(album.tags || [])].filter(Boolean) as string[])].slice(
     0,
     limit
   );
+}
+
+function cvInitial(name: string) {
+  const first = name.trim()[0] || '#';
+  if (/^[a-z]$/i.test(first)) return first.toUpperCase();
+  if (/^\d$/.test(first)) return '#';
+  return first;
+}
+
+function buildCvProfiles(albums: Album[]): CvProfile[] {
+  const groups = new Map<string, Album[]>();
+  for (const album of albums.filter((item) => item.kind === 'drama')) {
+    for (const cv of album.cast || []) {
+      const name = cv.trim();
+      if (!name) continue;
+      const list = groups.get(name) || [];
+      list.push(album);
+      groups.set(name, list);
+    }
+  }
+  return [...groups.entries()]
+    .map(([name, cvAlbums]) => ({
+      name,
+      initial: cvInitial(name),
+      count: cvAlbums.length,
+      albums: cvAlbums,
+      cover: cvAlbums.find((album) => isImageCover(album.cover))?.cover || cvAlbums[0]?.cover
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN', { sensitivity: 'base', numeric: true }));
 }
 
 function filterValues(album: Album) {
@@ -186,7 +230,9 @@ function metadataFilterCount(filters: MetadataFilters) {
 export function App() {
   const [view, setView] = useState<AppView>('home');
   const [activeKind, setActiveKind] = useState<MediaKind>('drama');
+  const [activeHomePanel, setActiveHomePanel] = useState<HomePanel>('drama');
   const [albums, setAlbums] = useState<Album[]>([]);
+  const [cvAlbums, setCvAlbums] = useState<Album[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [favoriteFolders, setFavoriteFolders] = useState<FavoriteFolder[]>([]);
   const [activeCategory, setActiveCategory] = useState('');
@@ -200,25 +246,41 @@ export function App() {
   const [playerAlbum, setPlayerAlbum] = useState<Album | null>(null);
   const [playerEpisode, setPlayerEpisode] = useState<Episode | null>(null);
   const [metadataAnalyzeJob, setMetadataAnalyzeJob] = useState<MetadataAnalyzeJob | null>(null);
+  const [favoriteCvs, setFavoriteCvs] = useState<string[]>(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(favoriteCvStorageKey) || '[]');
+      return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string') : [];
+    } catch {
+      return [];
+    }
+  });
+  const [cvAvatars, setCvAvatars] = useState<Record<string, string>>({});
+  const [isRefreshingCvAvatars, setIsRefreshingCvAvatars] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [audioTime, setAudioTime] = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const lastProgressSaveRef = useRef(0);
 
   async function load(kind = activeKind, q = query, category = activeCategory, mode = searchMode) {
     setIsLoading(true);
     try {
-      const [nextAlbums, nextNas, nextCategories, nextFavoriteFolders] = await Promise.all([
+      const [nextAlbums, nextCvAlbums, nextNas, nextCategories, nextFavoriteFolders] = await Promise.all([
         fetchAlbums(kind, q, category, mode),
+        fetchAlbums('drama'),
         fetchNas(),
         fetchCategories(),
         fetchFavoriteFolders()
       ]);
       setAlbums(nextAlbums);
+      setCvAlbums(nextCvAlbums);
       setNas(nextNas);
       setCategories(nextCategories);
       setFavoriteFolders(nextFavoriteFolders);
       setNasRoot(nextNas.root || '');
+      fetchProfile()
+        .then((profile) => setCvAvatars(profile.cvAvatars || {}))
+        .catch(() => setCvAvatars({}));
       setSelectedAlbum((current) => {
         if (!current) return null;
         return nextAlbums.some((album) => album.id === current.id) ? current : null;
@@ -233,6 +295,10 @@ export function App() {
   useEffect(() => {
     void load(activeKind, query, activeCategory, searchMode);
   }, [activeKind, activeCategory, searchMode]);
+
+  useEffect(() => {
+    localStorage.setItem(favoriteCvStorageKey, JSON.stringify(favoriteCvs));
+  }, [favoriteCvs]);
 
   const continueAlbum = useMemo(() => albums.find((album) => album.status === 'listening') || albums[0], [albums]);
   const currentEpisode = continueAlbum?.episodes.find((episode) => (episode.progress || 0) < 100) || continueAlbum?.episodes[0];
@@ -266,6 +332,14 @@ export function App() {
       audio.load();
       setAudioTime(0);
       setAudioDuration(0);
+      audio.onloadedmetadata = () => {
+        const duration = audio.duration || 0;
+        setAudioDuration(duration);
+        if (duration > 0 && episode.progress && episode.progress > 0 && episode.progress < 100) {
+          audio.currentTime = Math.max(0, Math.min(duration - 1, (duration * episode.progress) / 100));
+          setAudioTime(audio.currentTime);
+        }
+      };
     }
     try {
       await audio.play();
@@ -293,11 +367,32 @@ export function App() {
     void playAlbum(displayedPlayerAlbum, displayedPlayerEpisode);
   }
 
+  function patchAlbumInState(nextAlbum: Album) {
+    setAlbums((current) => current.map((album) => (album.id === nextAlbum.id ? nextAlbum : album)));
+    setPlayerAlbum((current) => (current?.id === nextAlbum.id ? nextAlbum : current));
+    setSelectedAlbum((current) => (current?.id === nextAlbum.id ? nextAlbum : current));
+  }
+
+  async function savePlaybackProgress(force = false) {
+    const audio = audioRef.current;
+    if (!displayedPlayerAlbum || !displayedPlayerEpisode || !audio || !audio.duration) return;
+    const now = Date.now();
+    if (!force && now - lastProgressSaveRef.current < 5000) return;
+    lastProgressSaveRef.current = now;
+    try {
+      const nextAlbum = await updateEpisodeProgress(displayedPlayerAlbum.id, displayedPlayerEpisode.id, audio.currentTime || 0, audio.duration || 0);
+      patchAlbumInState(nextAlbum);
+    } catch {
+      // Playback should not be interrupted if progress persistence fails.
+    }
+  }
+
   function seekAudio(nextTime: number) {
     const audio = audioRef.current;
     if (!audio || !Number.isFinite(nextTime)) return;
     audio.currentTime = Math.max(0, Math.min(nextTime, audioDuration || nextTime));
     setAudioTime(audio.currentTime);
+    void savePlaybackProgress(true);
   }
 
   async function handleScan() {
@@ -305,6 +400,7 @@ export function App() {
       setNotice('正在扫描 NAS...');
       const result = await scanNas();
       setAlbums(result.albums.filter((album) => album.kind === activeKind));
+      setCvAlbums(result.albums.filter((album) => album.kind === 'drama'));
       setNas(result.nas);
       setNotice(`扫描完成，发现 ${result.count} 个音频文件`);
     } catch (error) {
@@ -345,6 +441,30 @@ export function App() {
     setView('search');
     const result = await fetchAlbums(undefined, cv, activeCategory, 'cv');
     setAlbums(result);
+  }
+
+  function handleHomePanelChange(panel: HomePanel) {
+    setActiveHomePanel(panel);
+    setView('home');
+    if (panel !== 'cv') setActiveKind(panel);
+  }
+
+  function toggleFavoriteCv(cv: string) {
+    setFavoriteCvs((current) => (current.includes(cv) ? current.filter((item) => item !== cv) : [cv, ...current]));
+  }
+
+  async function handleRefreshCvAvatars(names: string[]) {
+    if (!names.length || isRefreshingCvAvatars) return;
+    setIsRefreshingCvAvatars(true);
+    try {
+      const profile = await refreshCvAvatars(names);
+      setCvAvatars(profile.cvAvatars || {});
+      setNotice('CV 头像已刷新');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'CV 头像刷新失败');
+    } finally {
+      setIsRefreshingCvAvatars(false);
+    }
   }
 
   async function handleAddCategory(name: string) {
@@ -468,14 +588,22 @@ export function App() {
           {view === 'home' ? (
             <HomeView
               albums={albums}
+              cvAlbums={cvAlbums}
               activeKind={activeKind}
+              activeHomePanel={activeHomePanel}
               categories={categories}
               activeCategory={activeCategory}
               onCategoryChange={setActiveCategory}
-              onKindChange={setActiveKind}
+              onHomePanelChange={handleHomePanelChange}
               onViewChange={setView}
               isLoading={isLoading}
               onOpen={setSelectedAlbum}
+              onOpenCv={handleSearchCv}
+              favoriteCvs={favoriteCvs}
+              cvAvatars={cvAvatars}
+              isRefreshingCvAvatars={isRefreshingCvAvatars}
+              onToggleFavoriteCv={toggleFavoriteCv}
+              onRefreshCvAvatars={handleRefreshCvAvatars}
               onPlay={playAlbum}
               selectedAlbum={selectedAlbum}
               currentAlbum={displayedPlayerAlbum}
@@ -489,7 +617,7 @@ export function App() {
             />
           ) : null}
           {view === 'files' ? (
-            <FilesView nas={nas} nasRoot={nasRoot} setNasRoot={setNasRoot} onSave={handleSaveNas} onScan={handleScan} onOpen={setSelectedAlbum} />
+            <FilesView onOpen={setSelectedAlbum} />
           ) : null}
           {view === 'search' ? (
             <SearchView
@@ -509,6 +637,10 @@ export function App() {
               categories={categories}
               favoriteFolders={favoriteFolders}
               metadataAnalyzeJob={metadataAnalyzeJob}
+              nasRoot={nasRoot}
+              setNasRoot={setNasRoot}
+              onSaveNas={handleSaveNas}
+              onScanNas={handleScan}
               onAddCategory={handleAddCategory}
               onAnalyzeLibrary={handleAnalyzeLibraryMetadata}
               onOpen={setSelectedAlbum}
@@ -565,12 +697,21 @@ export function App() {
         </nav>
         <audio
           ref={audioRef}
-          onPause={() => setIsPlaying(false)}
+          onPause={() => {
+            setIsPlaying(false);
+            void savePlaybackProgress(true);
+          }}
           onPlay={() => setIsPlaying(true)}
-          onEnded={() => setIsPlaying(false)}
+          onEnded={() => {
+            setIsPlaying(false);
+            void savePlaybackProgress(true);
+          }}
           onLoadedMetadata={(event) => setAudioDuration(event.currentTarget.duration || 0)}
           onDurationChange={(event) => setAudioDuration(event.currentTarget.duration || 0)}
-          onTimeUpdate={(event) => setAudioTime(event.currentTarget.currentTime || 0)}
+          onTimeUpdate={(event) => {
+            setAudioTime(event.currentTarget.currentTime || 0);
+            void savePlaybackProgress();
+          }}
         />
       </main>
     </div>
@@ -596,14 +737,22 @@ function BottomNavButton({
 
 function HomeView({
   albums,
+  cvAlbums,
   activeKind,
+  activeHomePanel,
   categories,
   activeCategory,
   onCategoryChange,
-  onKindChange,
+  onHomePanelChange,
   onViewChange,
   isLoading,
   onOpen,
+  onOpenCv,
+  favoriteCvs,
+  cvAvatars,
+  isRefreshingCvAvatars,
+  onToggleFavoriteCv,
+  onRefreshCvAvatars,
   onPlay,
   selectedAlbum,
   currentAlbum,
@@ -616,14 +765,22 @@ function HomeView({
   onTogglePlay
 }: {
   albums: Album[];
+  cvAlbums: Album[];
   activeKind: MediaKind;
+  activeHomePanel: HomePanel;
   categories: Category[];
   activeCategory: string;
   onCategoryChange: (category: string) => void;
-  onKindChange: (kind: MediaKind) => void;
+  onHomePanelChange: (panel: HomePanel) => void;
   onViewChange: (view: AppView) => void;
   isLoading: boolean;
   onOpen: (album: Album) => void;
+  onOpenCv: (cv: string) => void;
+  favoriteCvs: string[];
+  cvAvatars: Record<string, string>;
+  isRefreshingCvAvatars: boolean;
+  onToggleFavoriteCv: (cv: string) => void;
+  onRefreshCvAvatars: (names: string[]) => Promise<void>;
   onPlay: (album: Album, episode?: Episode) => void;
   selectedAlbum: Album | null;
   currentAlbum: Album | null;
@@ -637,6 +794,7 @@ function HomeView({
 }) {
   const [filters, setFilters] = useState<MetadataFilters>(emptyMetadataFilters);
   const [isFilterOpen, setIsFilterOpen] = useState(false);
+  const [cvQuery, setCvQuery] = useState('');
   const filteredAlbums = useMemo(() => albums.filter((album) => matchesMetadataFilters(album, filters)), [albums, filters]);
   const hero = currentAlbum || albums.find((album) => album.status === 'listening') || albums[0];
   const heroProgress = currentAlbum?.id === hero?.id ? audioProgress : hero?.progress || 0;
@@ -705,8 +863,22 @@ function HomeView({
         <div className="hero-cover" style={{ background: coverBackground(hero?.cover) }} aria-hidden="true" />
       </section>
 
-      <QuickSketchStrip activeKind={activeKind} onKindChange={onKindChange} onViewChange={onViewChange} />
+      <QuickSketchStrip activePanel={activeHomePanel} onPanelChange={onHomePanelChange} onViewChange={onViewChange} />
 
+      {activeHomePanel === 'cv' ? (
+        <CvWall
+          albums={cvAlbums}
+          query={cvQuery}
+          setQuery={setCvQuery}
+          favoriteCvs={favoriteCvs}
+          cvAvatars={cvAvatars}
+          isRefreshing={isRefreshingCvAvatars}
+          onToggleFavorite={onToggleFavoriteCv}
+          onRefreshAvatars={onRefreshCvAvatars}
+          onOpenCv={onOpenCv}
+        />
+      ) : (
+        <>
       <SectionHeader title={kindLabel(activeKind)} subtitle="本地 NAS 内容 ›" />
       <CategoryChips categories={categories} activeCategory={activeCategory} onChange={onCategoryChange} />
       {activeKind === 'drama' ? (
@@ -744,7 +916,83 @@ function HomeView({
           </button>
         ))}
       </div>
+        </>
+      )}
     </>
+  );
+}
+
+function CvWall({
+  albums,
+  query,
+  setQuery,
+  favoriteCvs,
+  cvAvatars,
+  isRefreshing,
+  onToggleFavorite,
+  onRefreshAvatars,
+  onOpenCv
+}: {
+  albums: Album[];
+  query: string;
+  setQuery: (value: string) => void;
+  favoriteCvs: string[];
+  cvAvatars: Record<string, string>;
+  isRefreshing: boolean;
+  onToggleFavorite: (cv: string) => void;
+  onRefreshAvatars: (names: string[]) => Promise<void>;
+  onOpenCv: (cv: string) => void;
+}) {
+  const normalizedQuery = query.trim().toLowerCase();
+  const profiles = useMemo(() => buildCvProfiles(albums), [albums]);
+  const visibleProfiles = profiles
+    .filter((profile) => {
+      if (!normalizedQuery) return true;
+      return profile.name.toLowerCase().includes(normalizedQuery) || profile.initial.toLowerCase().includes(normalizedQuery);
+    })
+    .sort((a, b) => {
+      const favoriteDelta = Number(favoriteCvs.includes(b.name)) - Number(favoriteCvs.includes(a.name));
+      if (favoriteDelta) return favoriteDelta;
+      return a.name.localeCompare(b.name, 'zh-Hans-CN', { sensitivity: 'base', numeric: true });
+    });
+
+  return (
+    <section className="cv-wall-panel">
+      <div className="cv-wall-head">
+        <SectionHeader title="CV" subtitle={`${profiles.length} 位配音演员`} />
+        <button
+          disabled={isRefreshing}
+          onClick={() => void onRefreshAvatars(visibleProfiles.filter((profile) => !cvAvatars[profile.name]).map((profile) => profile.name))}
+        >
+          {isRefreshing ? '刷新中' : '刷新头像'}
+        </button>
+      </div>
+      <label className="cv-search" aria-label="搜索 CV">
+        <Search size={16} />
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索 CV 名字" />
+      </label>
+      <div className="cv-grid">
+        {visibleProfiles.map((profile) => {
+          const isFavorite = favoriteCvs.includes(profile.name);
+          const avatar = cvAvatars[profile.name] || profile.cover;
+          return (
+            <article key={profile.name} className={isFavorite ? 'cv-card favorite' : 'cv-card'}>
+              <button className="cv-avatar-button" onClick={() => void onOpenCv(profile.name)} aria-label={`查看 ${profile.name} 的广播剧`}>
+                <span className="cv-avatar" style={{ background: coverBackground(avatar) }}>
+                  {isImageCover(avatar) ? null : profile.initial}
+                </span>
+              </button>
+              <button className="cv-favorite-button" onClick={() => onToggleFavorite(profile.name)} aria-label={isFavorite ? `取消喜爱 ${profile.name}` : `喜爱 ${profile.name}`}>
+                <Heart size={13} fill={isFavorite ? 'currentColor' : 'none'} />
+              </button>
+              <strong>{profile.name}</strong>
+              <small>{profile.count} 部</small>
+            </article>
+          );
+        })}
+      </div>
+      {!visibleProfiles.length ? <div className="empty-state compact">还没有找到 CV。先用 DeepSeek 整理或手动补配音演员。</div> : null}
+    </section>
   );
 }
 
@@ -791,18 +1039,18 @@ function DramaListRow({
 }
 
 function QuickSketchStrip({
-  activeKind,
-  onKindChange,
+  activePanel,
+  onPanelChange,
   onViewChange
 }: {
-  activeKind: MediaKind;
-  onKindChange: (kind: MediaKind) => void;
+  activePanel: HomePanel;
+  onPanelChange: (panel: HomePanel) => void;
   onViewChange: (view: AppView) => void;
 }) {
-  const items: Array<{ icon: SketchIconName; label: string; kind?: MediaKind; view?: AppView }> = [
-    { icon: 'drama', label: '广播剧', kind: 'drama' },
-    { icon: 'book', label: '有声书', kind: 'book' },
-    { icon: 'course', label: '网课', kind: 'course' },
+  const items: Array<{ icon: SketchIconName; label: string; panel?: HomePanel; view?: AppView }> = [
+    { icon: 'drama', label: '广播剧', panel: 'drama' },
+    { icon: 'book', label: '有声书', panel: 'book' },
+    { icon: 'cv', label: 'CV', panel: 'cv' },
     { icon: 'category', label: '分类', view: 'home' }
   ];
 
@@ -811,9 +1059,9 @@ function QuickSketchStrip({
       {items.map((item) => (
         <button
           key={item.label}
-          className={item.kind && activeKind === item.kind ? 'active' : ''}
+          className={item.panel && activePanel === item.panel ? 'active' : ''}
           onClick={() => {
-            if (item.kind) onKindChange(item.kind);
+            if (item.panel) onPanelChange(item.panel);
             if (item.view) onViewChange(item.view);
           }}
         >
@@ -883,6 +1131,16 @@ function SketchIcon({ name, decorated = false }: { name: SketchIconName; decorat
           <path d="M24 34v4" />
           <path className="accent-line" d="M17 22h14M17 27h9" />
           <path className="accent-fill" d="M34 22h3v8h-3z" />
+        </>
+      ) : null}
+      {name === 'cv' ? (
+        <>
+          <circle cx="21" cy="18" r="8" />
+          <path d="M9 39c2.2-7 7.5-10 12-10s9.8 3 12 10" />
+          <path d="M35 17v8c0 5-3.8 9-8.8 9" />
+          <path d="M34 25h5" />
+          <path className="accent-line" d="M16 19c2 2 8 2 10 0" />
+          <circle className="accent-dot" cx="36" cy="13" r="2.2" />
         </>
       ) : null}
       {name === 'category' ? (
@@ -1095,8 +1353,8 @@ function AlbumCard({ album, active, onOpen }: { album: Album; active?: boolean; 
 
 function seriesTitleForAlbum(title: string) {
   return title
-    .replace(/\s+第[一二三四五六七八九十两\d]+季(?:（[上下]）)?$/u, '')
-    .replace(/\s+第[一二三四五六七八九十两\d]+季(?:[上下])?$/u, '')
+    .replace(/[\s·・_-]*第[一二三四五六七八九十两\d]+季(?:（[上下]）)?$/u, '')
+    .replace(/[\s·・_-]*第[一二三四五六七八九十两\d]+季(?:[上下])?$/u, '')
     .trim();
 }
 
@@ -1125,23 +1383,10 @@ function groupDramaSeries(albums: Album[]): DramaSeries[] {
     .sort((a, b) => a.title.localeCompare(b.title, 'zh-Hans-CN', { numeric: true, sensitivity: 'base' }));
 }
 
-function FilesView({
-  nas,
-  nasRoot,
-  setNasRoot,
-  onSave,
-  onScan,
-  onOpen
-}: {
-  nas: NasConfig | null;
-  nasRoot: string;
-  setNasRoot: (value: string) => void;
-  onSave: () => void;
-  onScan: () => void;
-  onOpen: (album: Album) => void;
-}) {
+function FilesView({ onOpen }: { onOpen: (album: Album) => void }) {
   const [dramaAlbums, setDramaAlbums] = useState<Album[]>([]);
   const [isLoadingDrama, setIsLoadingDrama] = useState(false);
+  const [selectedSeriesId, setSelectedSeriesId] = useState('');
 
   async function loadDramaWall() {
     setIsLoadingDrama(true);
@@ -1156,32 +1401,26 @@ function FilesView({
     void loadDramaWall();
   }, []);
 
-  async function scanAndRefresh() {
-    await onScan();
-    await loadDramaWall();
-  }
-
   const series = groupDramaSeries(dramaAlbums);
+  const selectedSeries = series.find((item) => item.id === selectedSeriesId);
+  function handleOpenSeries(item: DramaSeries) {
+    if (item.albums.length <= 1) {
+      onOpen(item.albums[0]);
+      return;
+    }
+    setSelectedSeriesId(item.id);
+  }
 
   return (
     <section className="panel-page">
-      <SectionHeader title="NAS 文件" subtitle="先支持本地挂载路径，后续可扩展 SMB/WebDAV 登录" />
-      <div className="settings-card">
-        <label htmlFor="nas-root">NAS 挂载路径</label>
-        <input id="nas-root" value={nasRoot} onChange={(event) => setNasRoot(event.target.value)} placeholder="/Volumes/你的NAS/广播剧" />
-        <div className="button-row">
-          <button onClick={onSave}>保存路径</button>
-          <button className="filled" onClick={() => void scanAndRefresh()}>
-            扫描音频
-          </button>
-        </div>
-        <p>{nas?.connected ? `已连接：${nas.root}` : '当前未连接。可以先把 NAS 挂载到本机，再填入路径。'}</p>
-      </div>
-
       <SectionHeader title="广播剧系列墙" subtitle={isLoadingDrama ? '正在整理...' : `${series.length} 个系列`} />
       <div className="series-wall">
         {series.map((item) => (
-          <button key={item.id} className="series-card" onClick={() => onOpen(item.albums[0])}>
+          <button
+            key={item.id}
+            className={selectedSeriesId === item.id ? 'series-card active' : 'series-card'}
+            onClick={() => handleOpenSeries(item)}
+          >
             <span className="series-cover-stack" aria-hidden="true">
               {item.albums.slice(0, 4).map((album, index) => (
                 <i
@@ -1202,6 +1441,41 @@ function FilesView({
           </button>
         ))}
       </div>
+      {selectedSeries ? (
+        <section className="series-picker" aria-label="选择季数">
+          <button className="series-picker-backdrop" aria-label="关闭选择季数" onClick={() => setSelectedSeriesId('')} />
+          <div className="series-season-panel">
+            <div className="series-season-head">
+              <div>
+                <span>选择季数</span>
+                <strong>{selectedSeries.title}</strong>
+              </div>
+              <button onClick={() => setSelectedSeriesId('')}>关闭</button>
+            </div>
+            <div className="series-season-list">
+              {selectedSeries.albums.map((album) => (
+                <button
+                  key={album.id}
+                  className="series-season-row"
+                  onClick={() => {
+                    setSelectedSeriesId('');
+                    onOpen(album);
+                  }}
+                >
+                  <span className="mini-cover" style={{ background: coverBackground(album.cover) }} />
+                  <span>
+                    <strong>{album.title}</strong>
+                    <small>
+                      {album.totalEpisodes} 集 · 已播放 {Math.round(album.progress)}%
+                    </small>
+                  </span>
+                  <em>进入</em>
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
+      ) : null}
     </section>
   );
 }
@@ -1279,6 +1553,10 @@ function MeView({
   categories,
   favoriteFolders,
   metadataAnalyzeJob,
+  nasRoot,
+  setNasRoot,
+  onSaveNas,
+  onScanNas,
   onAddCategory,
   onAnalyzeLibrary,
   onOpen
@@ -1288,6 +1566,10 @@ function MeView({
   categories: Category[];
   favoriteFolders: FavoriteFolder[];
   metadataAnalyzeJob: MetadataAnalyzeJob | null;
+  nasRoot: string;
+  setNasRoot: (value: string) => void;
+  onSaveNas: () => Promise<void>;
+  onScanNas: () => Promise<void>;
   onAddCategory: (name: string) => Promise<void>;
   onAnalyzeLibrary: (mode?: MetadataAnalyzeMode) => Promise<void>;
   onOpen: (album: Album) => void;
@@ -1372,7 +1654,6 @@ function MeView({
   }
 
   const myTools: Array<{ icon: SketchIconName; label: string; note: string }> = [
-    { icon: 'nas', label: 'NAS 设置', note: '连接目录' },
     { icon: 'timer', label: '定时关闭', note: '睡前播放' },
     { icon: 'chase', label: '我的追剧', note: '继续听' },
     { icon: 'category', label: '分类设置', note: '古代/现代' },
@@ -1433,6 +1714,18 @@ function MeView({
             <span>分类</span>
           </div>
         </div>
+      </div>
+
+      <div className="settings-card me-nas-card">
+        <label htmlFor="me-nas-root">NAS 音频路径</label>
+        <input id="me-nas-root" value={nasRoot} onChange={(event) => setNasRoot(event.target.value)} placeholder="/docker/private-audio-room/Audio" />
+        <div className="button-row">
+          <button onClick={() => void onSaveNas()}>保存路径</button>
+          <button className="filled" onClick={() => void onScanNas()}>
+            扫描音频
+          </button>
+        </div>
+        <p>{nas?.connected ? `已连接：${nas.root}` : '把广播剧目录挂载到容器后，在这里保存路径并扫描。'}</p>
       </div>
 
       <section className="favorites-panel">
@@ -1952,6 +2245,10 @@ function AlbumDrawer({
                   ) : (
                     <strong>未填写</strong>
                   )}
+                </div>
+                <div>
+                  <span>感情向</span>
+                  <strong>{album.relationship || '未填写'}</strong>
                 </div>
                 <div>
                   <span>主角组合</span>

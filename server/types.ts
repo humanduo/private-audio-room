@@ -55,6 +55,7 @@ export type AlbumRecommendation = {
 
 export type UserProfile = {
   avatar: string;
+  cvAvatars?: Record<string, string>;
 };
 
 export type NasConfig = {

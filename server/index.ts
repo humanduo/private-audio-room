@@ -58,25 +58,36 @@ function normalizeState(state: Partial<AppState>): AppState {
   const existingAlbums = state.albums?.length ? state.albums : mockAlbums;
   const albums = existingAlbums.map((album) => {
     const defaultAlbum = defaultAlbumMap.get(album.id);
-    if (!defaultAlbum) return album;
+    if (!defaultAlbum) {
+      return {
+        ...album,
+        tags: cleanMetadataTags(album.tags || []),
+        genres: cleanMetadataTags(album.genres || []),
+        cast: uniqueStrings(album.cast || [])
+      };
+    }
     const hasCustomCover =
       album.cover?.startsWith('data:image/') || album.cover?.startsWith('/covers/') || album.cover?.startsWith('/assets/');
     return {
       ...defaultAlbum,
       ...album,
       cover: hasCustomCover ? album.cover : defaultAlbum.cover,
-      tags: uniqueStrings([...(defaultAlbum.tags || []), ...(album.tags || [])]),
+      tags: cleanMetadataTags([...(defaultAlbum.tags || []), ...(album.tags || [])]),
       cast: uniqueStrings(album.cast || defaultAlbum.cast || []),
-      genres: uniqueStrings(album.genres || defaultAlbum.genres || [])
+      genres: cleanMetadataTags(album.genres || defaultAlbum.genres || [])
     };
   });
+  const enrichedAlbums = albums.map((album) => ({
+    ...album,
+    cast: album.cast?.length ? album.cast : siblingCastForAlbum(album, albums)
+  }));
 
   return {
     nas: state.nas || defaultNasConfig,
-    albums,
+    albums: enrichedAlbums,
     categories: state.categories?.length ? state.categories : defaultCategories,
     favoriteFolders: normalizeFavoriteFolders(state.favoriteFolders),
-    profile: state.profile || { avatar: '' }
+    profile: { avatar: '', cvAvatars: {}, ...(state.profile || {}) }
   };
 }
 
@@ -87,7 +98,7 @@ function readState(): AppState {
       albums: mockAlbums,
       categories: defaultCategories,
       favoriteFolders: normalizeFavoriteFolders([]),
-      profile: { avatar: '' }
+      profile: { avatar: '', cvAvatars: {} }
     };
   }
 
@@ -156,6 +167,12 @@ function uniqueStrings(values: unknown[]) {
   return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
 }
 
+const genericMetadataTags = new Set(['nas', '本地', '广播剧', '有声书', '网课', '课程', '听书', '未知']);
+
+function cleanMetadataTags(values: unknown[]) {
+  return uniqueStrings(values).filter((value) => !genericMetadataTags.has(value.toLowerCase()));
+}
+
 function stringField(value: unknown, maxLength = 600) {
   return String(value || '').trim().slice(0, maxLength);
 }
@@ -165,29 +182,68 @@ function arrayField(value: unknown, maxItems = 12) {
   return uniqueStrings(String(value || '').split(/[，,、\n]/)).slice(0, maxItems);
 }
 
+function metadataValue(body: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    if (body[key] !== undefined && body[key] !== null && body[key] !== '') return body[key];
+  }
+  return '';
+}
+
+function normalizeRelationship(value: string) {
+  const text = value.trim();
+  if (!text) return '';
+  if (/耽美|纯爱|bl|双男主/i.test(text)) return '耽美';
+  if (/百合|gl|双女主/i.test(text)) return '百合';
+  if (/言情|男女|bg|异性/i.test(text)) return '言情';
+  if (/无\s*cp|无感情线|剧情向/i.test(text)) return '无 CP';
+  if (/群像|多主角/i.test(text)) return '群像';
+  return text.slice(0, 30);
+}
+
+function normalizeAudience(value: string, relationship = '') {
+  const text = value.trim();
+  if (/男男|双男|耽美|纯爱|bl/i.test(text) || relationship === '耽美') return '男男';
+  if (/女女|双女|百合|gl/i.test(text) || relationship === '百合') return '女女';
+  if (/男女|言情|bg/i.test(text) || relationship === '言情') return '男女';
+  if (/群像|多主角/i.test(text) || relationship === '群像') return '群像';
+  return text.slice(0, 30);
+}
+
+function normalizeFinishStatus(value: string, albumTitle = '') {
+  const text = `${value} ${albumTitle}`.trim();
+  if (/完结|已完|全[一二三四五六七八九十0-9]+季|全集|最终季/.test(text)) return '已完结';
+  if (/连载|更新中|未完|待更/.test(text)) return '连载中';
+  if (/未知|不确定/.test(text)) return '未知';
+  return stringField(value, 30) || '未知';
+}
+
 function metadataPatchFromBody(body: Record<string, unknown>) {
+  const relationship = normalizeRelationship(stringField(metadataValue(body, ['relationship', '感情向', '类型向']), 30));
+  const audience = normalizeAudience(stringField(metadataValue(body, ['audience', '主角组合', '主角类别', 'cpType', 'coupleType']), 30), relationship);
   return {
     author: stringField(body.author, 80),
     cast: arrayField(body.cast, 20),
     summary: stringField(body.summary, 1200),
-    genres: arrayField(body.genres, 16),
-    relationship: stringField(body.relationship, 30),
-    audience: stringField(body.audience, 30),
-    finishStatus: stringField(body.finishStatus, 30),
-    tags: arrayField(body.tags, 24),
+    genres: cleanMetadataTags(arrayField(body.genres, 16)),
+    relationship,
+    audience,
+    finishStatus: normalizeFinishStatus(stringField(metadataValue(body, ['finishStatus', '完结状态', '状态']), 30)),
+    tags: cleanMetadataTags(arrayField(body.tags, 24)),
     description: stringField(body.description, 1200)
   };
 }
 
 function aiMetadataFromBody(body: Record<string, unknown>): AiMetadata {
+  const relationship = normalizeRelationship(stringField(metadataValue(body, ['relationship', '感情向', '类型向']), 30));
+  const audience = normalizeAudience(stringField(metadataValue(body, ['audience', '主角组合', '主角类别', 'cpType', 'coupleType']), 30), relationship);
   return {
-    author: stringField(body.author, 80),
-    cast: arrayField(body.cast, 20),
-    summary: stringField(body.summary || body.shortSummary, 1200),
-    genres: arrayField(body.genres, 16),
-    relationship: stringField(body.relationship, 30),
-    audience: stringField(body.audience, 30),
-    finishStatus: stringField(body.finishStatus, 30),
+    author: stringField(metadataValue(body, ['author', '原著', '作者']), 80),
+    cast: arrayField(metadataValue(body, ['cast', 'cv', 'CV', '配音', '配音演员', '主播']), 20),
+    summary: stringField(metadataValue(body, ['summary', 'shortSummary', '剧情简介', '简介']), 1200),
+    genres: cleanMetadataTags(arrayField(metadataValue(body, ['genres', 'tags', '题材标签', '类型', '标签']), 16)),
+    relationship,
+    audience,
+    finishStatus: normalizeFinishStatus(stringField(metadataValue(body, ['finishStatus', '完结状态', '状态']), 30)),
     confidence: Math.max(0, Math.min(1, Number(body.confidence || 0))),
     needsReview: body.needsReview !== false
   };
@@ -254,9 +310,79 @@ function decodeDuckDuckGoUrl(value: string) {
   }
 }
 
+function resolveUrlMaybe(value: string, baseUrl: string) {
+  try {
+    return new URL(value, baseUrl).toString();
+  } catch {
+    return value;
+  }
+}
+
+function extractMetaImage(html: string, baseUrl: string) {
+  const patterns = [
+    /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i,
+    /<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image["']/i,
+    /<img[^>]+class=["'][^"']*(?:avatar|portrait|lemmaWgt-pic|summary-pic)[^"']*["'][^>]+src=["']([^"']+)["']/i,
+    /<img[^>]+src=["']([^"']+)["'][^>]+class=["'][^"']*(?:avatar|portrait|lemmaWgt-pic|summary-pic)[^"']*["']/i
+  ];
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match?.[1]) return resolveUrlMaybe(decodeHtml(match[1]).replace(/^\/\//, 'https://'), baseUrl);
+  }
+  return '';
+}
+
+async function downloadImageAsDataUrl(imageUrl: string) {
+  const response = await fetch(imageUrl, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 PrivateAudioRoom/0.1',
+      Referer: new URL(imageUrl).origin
+    }
+  });
+  if (!response.ok) throw new Error(`avatar image failed: ${response.status}`);
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.startsWith('image/')) throw new Error('avatar image is not an image');
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (!bytes.length || bytes.length > 2_500_000) throw new Error('avatar image size is invalid');
+  return `data:${contentType.split(';')[0]};base64,${bytes.toString('base64')}`;
+}
+
+async function findCvAvatar(name: string) {
+  const queries = uniqueStrings([
+    `${name} 配音演员 百度百科 头像`,
+    `${name} 配音演员 微博 头像`,
+    `${name} CV 配音演员 个人资料`
+  ]);
+  const candidates = [];
+  for (const query of queries) {
+    candidates.push(...(await searchMetadataQuery(query)));
+  }
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    if (!candidate.url || seen.has(candidate.url)) continue;
+    seen.add(candidate.url);
+    try {
+      const page = await fetch(candidate.url, {
+        headers: { 'User-Agent': 'Mozilla/5.0 PrivateAudioRoom/0.1' }
+      });
+      if (!page.ok) continue;
+      const html = await page.text();
+      const image = extractMetaImage(html, candidate.url);
+      if (!image || /logo|icon|sprite/i.test(image)) continue;
+      return await downloadImageAsDataUrl(image);
+    } catch {
+      // Keep trying the next public result.
+    }
+  }
+  return '';
+}
+
 function metadataSearchQuery(album: Album) {
   return uniqueStrings([
     album.title.replace(/\s+第[一二三四五六七八九十0-9]+季$/i, ''),
+    album.title.replace(/\s+第[一二三四五六七八九十0-9]+季[（(][上下][）)]$/i, ''),
     album.title,
     album.subtitle
   ])
@@ -265,12 +391,14 @@ function metadataSearchQuery(album: Album) {
     .join(' ');
 }
 
-async function searchAlbumMetadata(album: Album) {
-  if (process.env.AI_METADATA_ALLOW_WEB_SEARCH === 'false') return [];
+function seriesTitleForMetadata(title: string) {
+  return title
+    .replace(/[\s·・_-]*第[一二三四五六七八九十两\d]+季(?:[（(][上下][）)])?$/u, '')
+    .replace(/[\s·・_-]*第[一二三四五六七八九十两\d]+季(?:[上下])?$/u, '')
+    .trim();
+}
 
-  const query = `${metadataSearchQuery(album)} 广播剧 原著 配音演员 CV 简介`;
-  if (!query.trim()) return [];
-
+async function searchMetadataQuery(query: string) {
   const response = await fetch(`https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
     headers: { 'User-Agent': 'Mozilla/5.0 PrivateAudioRoom/0.1' }
   });
@@ -278,13 +406,37 @@ async function searchAlbumMetadata(album: Album) {
 
   const html = await response.text();
   return [...html.matchAll(/<a rel="nofollow" class="result__a" href="([^"]+)">([\s\S]*?)<\/a>[\s\S]*?<a class="result__snippet"[\s\S]*?>([\s\S]*?)<\/a>/g)]
-    .slice(0, 6)
+    .slice(0, 5)
     .map((match) => ({
       title: cleanHtmlText(match[2]).slice(0, 120),
-      snippet: cleanHtmlText(match[3]).slice(0, 500),
+      snippet: cleanHtmlText(match[3]).slice(0, 520),
       url: decodeDuckDuckGoUrl(match[1]).slice(0, 300)
     }))
     .filter((item) => item.title || item.snippet);
+}
+
+async function searchAlbumMetadata(album: Album) {
+  if (process.env.AI_METADATA_ALLOW_WEB_SEARCH === 'false') return [];
+
+  const baseQuery = metadataSearchQuery(album);
+  if (!baseQuery.trim()) return [];
+
+  const queries = uniqueStrings([
+    `${baseQuery} 广播剧 配音演员 CV 配音表`,
+    `${baseQuery} 广播剧 原著 主役 协役 CAST`,
+    `${baseQuery} 猫耳FM 漫播 饭角 配音演员 简介`
+  ]);
+  const results = [];
+  for (const query of queries) {
+    results.push(...(await searchMetadataQuery(query)));
+  }
+  const seen = new Set<string>();
+  return results.filter((item) => {
+    const key = `${item.title}-${item.url}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 10);
 }
 
 async function safeSearchAlbumMetadata(album: Album) {
@@ -308,13 +460,17 @@ async function analyzeAlbumMetadataWithDeepSeek(album: Album) {
   const prompt = [
     '你是一个私人 NAS 广播剧资料整理助手。请根据“剧名/文件夹名”和“公开搜索摘要”整理广播剧元数据。',
     '不要根据分集标题推断整部剧资料。作者、配音演员必须优先来自公开搜索摘要；不确定时留空或降低 confidence，并设置 needsReview=true。',
+    'cast 很重要：请重点从公开摘要里的 主役、协役、配音、CV、CAST、领衔主演、配音演员 中提取姓名。只要公开摘要里出现了明确人名，就写入 cast；完全找不到再返回空数组。',
     'summary 必须尽量填写：如果公开摘要里有简介，请改写成 60-140 字中文简介；如果公开摘要很少，可以根据剧名和已有简介生成保守简介，并设置 needsReview=true。',
+    'relationship、audience、finishStatus 不要轻易留空：如果搜索摘要、剧名或常识能合理判断，就给出最可能值，并用 confidence / needsReview 表示不确定。',
     '只返回 JSON，不要 Markdown，不要解释。',
     '',
     '允许的 relationship：言情、耽美、百合、无 CP、群像、空字符串。',
     '允许的 audience：男女、男男、女女、群像、空字符串。',
     '允许的 finishStatus：已完结、连载中、未知。',
-    'genres 用短标签，例如：现代、古风、悬疑、恐怖、刑侦、甜宠、虐恋、权谋、无限流、校园、娱乐圈、修仙、治愈、强强。',
+    '推断规则：耽美/纯爱/BL/双男主 => relationship=耽美 且 audience=男男；百合/GL/双女主 => relationship=百合 且 audience=女女；言情/BG => relationship=言情 且 audience=男女；无明显爱情线 => relationship=无 CP；多主角多线叙事 => 群像。',
+    '如果标题或公开资料包含 完结、已完结、全集、最终季，finishStatus=已完结；包含连载、更新中、待更，finishStatus=连载中；实在无法判断才写未知。',
+    'genres 用短标签，例如：现代、古风、悬疑、恐怖、刑侦、甜宠、虐恋、权谋、无限流、校园、娱乐圈、修仙、治愈、强强。不要返回 NAS、本地、广播剧、有声书、网课 这类系统标签。',
     'cast 只写 CV/配音演员/主播姓名，不要写制作组、工作室、平台名。',
     '',
     `标题：${album.title}`,
@@ -327,7 +483,7 @@ async function analyzeAlbumMetadataWithDeepSeek(album: Album) {
     `公开搜索摘要：\n${searchContext}`,
     '',
     '返回格式：',
-    '{"author":"","cast":[],"summary":"","genres":[],"relationship":"","audience":"","finishStatus":"未知","confidence":0.5,"needsReview":true}'
+    '{"author":"","cast":[],"summary":"","genres":[],"relationship":"耽美","audience":"男男","finishStatus":"已完结","confidence":0.5,"needsReview":true}'
   ].join('\n');
 
   let response: Response;
@@ -363,19 +519,32 @@ async function analyzeAlbumMetadataWithDeepSeek(album: Album) {
   return aiMetadataFromBody(extractJsonObject(content));
 }
 
-function applyAiMetadataToAlbum(album: Album, metadata: AiMetadata): Album {
-  const nextTags = uniqueStrings([...(album.tags || []), ...(metadata.genres || [])]);
+function siblingCastForAlbum(album: Album, albums: Album[]) {
+  const seriesTitle = seriesTitleForMetadata(album.title);
+  if (!seriesTitle) return [];
+  return uniqueStrings(
+    albums
+      .filter((item) => item.id !== album.id && seriesTitleForMetadata(item.title) === seriesTitle)
+      .flatMap((item) => item.cast || [])
+  ).slice(0, 20);
+}
+
+function applyAiMetadataToAlbum(album: Album, metadata: AiMetadata, albums: Album[] = []): Album {
+  const relationship = metadata.relationship || album.relationship || '';
+  const audience = metadata.audience || normalizeAudience('', relationship) || album.audience;
+  const nextTags = cleanMetadataTags([...(album.tags || []), ...(metadata.genres || []), relationship, audience, metadata.finishStatus]);
+  const nextCast = metadata.cast.length ? metadata.cast : uniqueStrings([...(album.cast || []), ...siblingCastForAlbum(album, albums)]).slice(0, 20);
   return {
     ...album,
     author: metadata.author || album.author,
-    cast: metadata.cast.length ? metadata.cast : album.cast,
+    cast: nextCast,
     summary: metadata.summary || album.summary,
     description: metadata.summary || album.description,
-    genres: metadata.genres.length ? metadata.genres : album.genres,
-    relationship: metadata.relationship || album.relationship,
-    audience: metadata.audience || album.audience,
-    finishStatus: metadata.finishStatus || album.finishStatus,
-    tags: nextTags.length ? nextTags : album.tags,
+    genres: metadata.genres.length ? cleanMetadataTags(metadata.genres) : cleanMetadataTags(album.genres || []),
+    relationship,
+    audience,
+    finishStatus: normalizeFinishStatus(metadata.finishStatus || album.finishStatus || '', album.title),
+    tags: nextTags,
     updatedAt: '刚刚整理',
     aiMetaStatus: metadata.needsReview ? 'suggested' : 'saved',
     aiMetaUpdatedAt: new Date().toISOString()
@@ -506,7 +675,7 @@ async function runMetadataAnalyzeJob(jobId: string) {
     updateMetadataAnalyzeJob(jobId, { currentAlbumTitle: album.title });
     try {
       const metadata = await analyzeAlbumMetadataWithDeepSeek(album);
-      state.albums[index] = applyAiMetadataToAlbum(state.albums[index], metadata);
+      state.albums[index] = applyAiMetadataToAlbum(state.albums[index], metadata, state.albums);
       writeState(state);
       const current = metadataAnalyzeJobs.get(jobId);
       if (!current) return;
@@ -569,12 +738,12 @@ function mergeManualMetadata(scanned: Album[], existing: Album[]) {
       cover: hasCustomCover ? previous.cover : album.cover,
       status: previous.status || album.status,
       progress: previous.progress || album.progress,
-      tags: uniqueStrings([...(album.tags || []), ...(previous.tags || []), ...(previous.genres || [])]),
+      tags: cleanMetadataTags([...(album.tags || []), ...(previous.tags || []), ...(previous.genres || [])]),
       description: previous.description && previous.description !== `来自 NAS 目录：${album.title}` ? previous.description : album.description,
       author: previous.author || album.author,
       cast: uniqueStrings(previous.cast || album.cast || []),
       summary: previous.summary || album.summary,
-      genres: uniqueStrings(previous.genres || album.genres || []),
+      genres: cleanMetadataTags(previous.genres || album.genres || []),
       relationship: previous.relationship || album.relationship,
       audience: previous.audience || album.audience,
       finishStatus: previous.finishStatus || album.finishStatus,
@@ -1080,6 +1249,36 @@ app.get('/api/albums/:id/recommendations', (req, res) => {
   res.json({ recommendations: getAlbumRecommendations(album, state.albums, limit) });
 });
 
+app.patch('/api/albums/:albumId/episodes/:episodeId/progress', (req, res) => {
+  const state = readState();
+  const albumIndex = state.albums.findIndex((item) => item.id === req.params.albumId);
+  if (albumIndex < 0) return res.status(404).json({ error: 'Album not found' });
+
+  const album = state.albums[albumIndex];
+  const episodeIndex = album.episodes.findIndex((item) => item.id === req.params.episodeId);
+  if (episodeIndex < 0) return res.status(404).json({ error: 'Episode not found' });
+
+  const currentTime = Math.max(0, Number(req.body?.currentTime || 0));
+  const duration = Math.max(0, Number(req.body?.duration || 0));
+  const episodeProgress = duration > 0 ? Math.max(0, Math.min(100, Math.round((currentTime / duration) * 100))) : Number(album.episodes[episodeIndex].progress || 0);
+  const nextEpisodes = album.episodes.map((episode, index) => (index === episodeIndex ? { ...episode, progress: episodeProgress } : episode));
+  const albumProgress = nextEpisodes.length ? Math.round(nextEpisodes.reduce((sum, episode) => sum + Number(episode.progress || 0), 0) / nextEpisodes.length) : episodeProgress;
+
+  state.albums = state.albums.map((item, index) => ({
+    ...item,
+    status: index === albumIndex ? (albumProgress >= 100 ? 'finished' : 'listening') : item.status === 'listening' ? 'new' : item.status
+  }));
+  state.albums[albumIndex] = {
+    ...state.albums[albumIndex],
+    episodes: nextEpisodes,
+    progress: albumProgress,
+    updatedAt: '刚刚播放'
+  };
+
+  writeState(state);
+  res.json({ album: state.albums[albumIndex] });
+});
+
 app.patch('/api/albums/:id/cover', (req, res) => {
   const cover = String(req.body.cover || '').trim();
   if (!cover) return res.status(400).json({ error: 'Cover is required' });
@@ -1107,11 +1306,12 @@ app.patch('/api/albums/:id/metadata', (req, res) => {
   if (albumIndex < 0) return res.status(404).json({ error: 'Album not found' });
 
   const patch = metadataPatchFromBody(req.body || {});
-  const nextTags = uniqueStrings([...patch.tags, ...patch.genres]);
+  const nextTags = cleanMetadataTags([...state.albums[albumIndex].tags, ...patch.tags, ...patch.genres]);
   state.albums[albumIndex] = {
     ...state.albums[albumIndex],
     ...patch,
-    tags: nextTags.length ? nextTags : state.albums[albumIndex].tags,
+    genres: cleanMetadataTags(patch.genres.length ? patch.genres : state.albums[albumIndex].genres || []),
+    tags: nextTags,
     aiMetaStatus: state.albums[albumIndex].aiMetaStatus === 'suggested' ? 'saved' : state.albums[albumIndex].aiMetaStatus,
     updatedAt: '刚刚整理'
   };
@@ -1126,7 +1326,7 @@ app.post('/api/albums/:id/metadata/analyze', async (req, res) => {
 
   try {
     const metadata = await analyzeAlbumMetadataWithDeepSeek(state.albums[albumIndex]);
-    state.albums[albumIndex] = applyAiMetadataToAlbum(state.albums[albumIndex], metadata);
+    state.albums[albumIndex] = applyAiMetadataToAlbum(state.albums[albumIndex], metadata, state.albums);
     writeState(state);
     res.json({ metadata, album: state.albums[albumIndex] });
   } catch (error) {
@@ -1155,7 +1355,7 @@ app.post('/api/metadata/analyze-batch', async (req, res) => {
   for (const { album, index } of candidates) {
     try {
       const metadata = await analyzeAlbumMetadataWithDeepSeek(album);
-      state.albums[index] = applyAiMetadataToAlbum(state.albums[index], metadata);
+      state.albums[index] = applyAiMetadataToAlbum(state.albums[index], metadata, state.albums);
       results.push({ id: album.id, title: album.title, ok: true });
     } catch (error) {
       state.albums[index] = {
@@ -1337,6 +1537,30 @@ app.patch('/api/profile', (req, res) => {
   state.profile = { ...state.profile, avatar };
   writeState(state);
   res.json({ profile: state.profile });
+});
+
+app.post('/api/cv-avatars/refresh', async (req, res) => {
+  const names = uniqueStrings(Array.isArray(req.body?.names) ? req.body.names : []).slice(0, 80);
+  if (!names.length) return res.status(400).json({ error: 'CV names are required' });
+
+  const state = readState();
+  const cvAvatars = { ...(state.profile.cvAvatars || {}) };
+  let updated = 0;
+
+  for (const name of names) {
+    try {
+      const avatar = await findCvAvatar(name);
+      if (!avatar) continue;
+      cvAvatars[name] = avatar;
+      updated += 1;
+    } catch {
+      // Public profile pages are inconsistent; missing avatars should not fail the whole batch.
+    }
+  }
+
+  state.profile = { ...state.profile, cvAvatars };
+  writeState(state);
+  res.json({ profile: state.profile, updated, total: names.length });
 });
 
 app.get('/api/nas', (_req, res) => {

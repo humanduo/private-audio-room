@@ -58,6 +58,17 @@ export async function fetchAlbumRecommendations(albumId: string): Promise<AlbumR
   return data.recommendations;
 }
 
+export async function updateEpisodeProgress(albumId: string, episodeId: string, currentTime: number, duration: number): Promise<Album> {
+  const response = await fetch(`/api/albums/${albumId}/episodes/${episodeId}/progress`, {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify({ currentTime, duration })
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || '播放进度保存失败');
+  return data.album;
+}
+
 export async function createFavoriteFolder(name: string): Promise<FavoriteFolder[]> {
   const response = await fetch('/api/favorite-folders', {
     method: 'POST',
@@ -98,6 +109,17 @@ export async function updateProfileAvatar(avatar: string): Promise<UserProfile> 
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || '头像保存失败');
+  return data.profile;
+}
+
+export async function refreshCvAvatars(names: string[]): Promise<UserProfile> {
+  const response = await fetch('/api/cv-avatars/refresh', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ names })
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'CV 头像刷新失败');
   return data.profile;
 }
 
