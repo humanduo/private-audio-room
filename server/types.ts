@@ -5,6 +5,7 @@ export type Episode = {
   title: string;
   duration: string;
   filePath?: string;
+  relativePath?: string;
   progress?: number;
   currentTime?: number;
   durationSeconds?: number;
@@ -27,11 +28,13 @@ export type Album = {
   description: string;
   author?: string;
   cast?: string[];
+  platform?: string;
   summary?: string;
   genres?: string[];
   relationship?: string;
   audience?: string;
   finishStatus?: string;
+  metadataSources?: string[];
   currentEpisodeId?: string;
   currentTime?: number;
   durationSeconds?: number;
@@ -39,6 +42,34 @@ export type Album = {
   aiMetaStatus?: 'none' | 'suggested' | 'saved' | 'failed';
   aiMetaUpdatedAt?: string;
   episodes: Episode[];
+};
+
+export type PlaybackProgress = {
+  albumId: string;
+  episodeId: string;
+  episodeTitle: string;
+  mediaUrl: string;
+  relativePath: string;
+  currentTime: number;
+  duration: number;
+  progress: number;
+  updatedAt: string;
+};
+
+export type AiPendingMetadata = {
+  id: string;
+  albumId: string;
+  title: string;
+  metadata: Partial<Album> & {
+    confidence?: number;
+    sources?: string[];
+    needsReview?: boolean;
+  };
+  sources: string[];
+  reason: string;
+  status: 'pending' | 'approved' | 'rejected';
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type Category = {

@@ -1,6 +1,7 @@
 import type {
   Album,
   AlbumRecommendation,
+  AiPendingMetadata,
   Category,
   FavoriteFolder,
   MediaKind,
@@ -177,6 +178,34 @@ export async function analyzeAlbumMetadata(
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'DeepSeek 资料整理失败');
   return { metadata: data.metadata, album: data.album };
+}
+
+export async function fetchAiPendingMetadata(): Promise<AiPendingMetadata[]> {
+  const response = await fetch('/api/metadata/pending');
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'AI 待确认加载失败');
+  return data.items;
+}
+
+export async function approveAiPendingMetadata(id: string): Promise<{ item: AiPendingMetadata; album: Album }> {
+  const response = await fetch(`/api/metadata/pending/${id}/approve`, { method: 'POST' });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'AI 资料批准失败');
+  return { item: data.item, album: data.album };
+}
+
+export async function rejectAiPendingMetadata(id: string): Promise<AiPendingMetadata> {
+  const response = await fetch(`/api/metadata/pending/${id}/reject`, { method: 'POST' });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'AI 资料拒绝失败');
+  return data.item;
+}
+
+export async function researchAiPendingMetadata(id: string): Promise<{ item: AiPendingMetadata; album: Album; autoApplied: boolean }> {
+  const response = await fetch(`/api/metadata/pending/${id}/research`, { method: 'POST' });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'AI 资料重新搜索失败');
+  return { item: data.item, album: data.album, autoApplied: Boolean(data.autoApplied) };
 }
 
 export async function estimateLibraryMetadata(mode: MetadataAnalyzeMode = 'all'): Promise<MetadataAnalyzeEstimate> {

@@ -1834,6 +1834,154 @@ button:focus-visible {
   font-weight: 900;
 }
 
+.ai-review-toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.ai-review-toolbar button {
+  height: 30px;
+  border-radius: 999px;
+  padding: 0 12px;
+  background: rgba(255, 99, 112, 0.1);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.ai-review-toolbar button:disabled {
+  opacity: 0.55;
+}
+
+.ai-review-error,
+.ai-review-empty {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.ai-review-error {
+  color: var(--accent);
+}
+
+.ai-pending-list {
+  display: grid;
+  gap: 10px;
+}
+
+.ai-pending-card {
+  display: grid;
+  gap: 10px;
+  border-radius: 18px;
+  padding: 11px;
+  background: #fff7f7;
+  box-shadow: inset 0 0 0 1px rgba(255, 99, 112, 0.1);
+}
+
+.ai-pending-main {
+  display: grid;
+  grid-template-columns: 46px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.ai-pending-main div {
+  min-width: 0;
+}
+
+.ai-pending-main strong,
+.ai-pending-main small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-pending-main strong {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 950;
+}
+
+.ai-pending-main small {
+  margin-top: 3px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.ai-pending-main em {
+  min-width: 42px;
+  height: 28px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 99, 112, 0.14);
+  color: var(--accent);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 950;
+}
+
+.ai-pending-card p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.55;
+}
+
+.ai-pending-chips,
+.ai-pending-sources,
+.ai-pending-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.ai-pending-chips i {
+  min-height: 23px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  background: rgba(255, 255, 255, 0.75);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.ai-pending-sources a,
+.ai-pending-sources span {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 900;
+  text-decoration: none;
+}
+
+.ai-pending-actions button {
+  height: 32px;
+  border-radius: 999px;
+  padding: 0 12px;
+  background: rgba(255, 255, 255, 0.86);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.ai-pending-actions button:first-child {
+  background: var(--accent);
+  color: #fff;
+}
+
+.ai-pending-actions button:disabled {
+  opacity: 0.5;
+}
+
 .category-settings-card {
   margin-top: 4px;
 }

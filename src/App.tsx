@@ -20,10 +20,12 @@ import {
   addAlbumToFavoriteFolder,
   analyzeAlbumMetadata,
   analyzeLibraryMetadata,
+  approveAiPendingMetadata,
   createFavoriteFolder,
   estimateLibraryMetadata,
   createCategory,
   fetchAlbumRecommendations,
+  fetchAiPendingMetadata,
   fetchAlbums,
   fetchCategories,
   fetchFavoriteFolders,
@@ -31,7 +33,9 @@ import {
   fetchProfile,
   generateAlbumCover,
   refreshCvAvatars,
+  rejectAiPendingMetadata,
   removeAlbumFromFavoriteFolder,
+  researchAiPendingMetadata,
   saveNas,
   scanNas,
   updateEpisodeProgress,
@@ -42,6 +46,7 @@ import {
 import type {
   Album,
   AlbumRecommendation,
+  AiPendingMetadata,
   AppView,
   Category,
   Episode,
@@ -120,6 +125,17 @@ const navItems: Array<{ view: AppView; label: string; icon: SketchIconName }> = 
 ];
 
 const favoriteCvStorageKey = 'private-audio-room.favorite-cvs';
+const playbackProgressStorageKey = 'private-audio-room.playback-progress';
+
+type LocalPlaybackProgress = {
+  albumId: string;
+  episodeId: string;
+  relativePath: string;
+  currentTime: number;
+  duration: number;
+  progress: number;
+  updatedAt: string;
+};
 
 function kindLabel(kind: MediaKind) {
   return tabs.find((tab) => tab.kind === kind)?.label || '内容';
@@ -185,6 +201,51 @@ function savedEpisodeTime(album: Album | null | undefined, episode: Episode | nu
 
 function savedEpisodeDuration(album: Album | null | undefined, episode: Episode | null | undefined) {
   return Math.max(0, episode?.durationSeconds || (album?.currentEpisodeId === episode?.id ? album?.durationSeconds || 0 : 0));
+}
+
+function playbackProgressKey(album: Album | null | undefined, episode: Episode | null | undefined) {
+  return episode?.relativePath || episode?.filePath || (album && episode ? `${album.id}:${episode.id}` : episode?.id || '');
+}
+
+function readLocalPlaybackProgress(album: Album | null | undefined, episode: Episode | null | undefined) {
+  const key = playbackProgressKey(album, episode);
+  if (!key) return null;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(playbackProgressStorageKey) || '{}') as Record<string, LocalPlaybackProgress>;
+    const item = parsed[key];
+    if (!item || !Number.isFinite(item.currentTime)) return null;
+    return item;
+  } catch {
+    return null;
+  }
+}
+
+function saveLocalPlaybackProgress(album: Album, episode: Episode, currentTime: number, duration: number) {
+  const key = playbackProgressKey(album, episode);
+  if (!key) return;
+  const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : savedEpisodeDuration(album, episode);
+  const safeCurrentTime = Number.isFinite(currentTime) && currentTime > 0 ? currentTime : 0;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(playbackProgressStorageKey) || '{}') as Record<string, LocalPlaybackProgress>;
+    parsed[key] = {
+      albumId: album.id,
+      episodeId: episode.id,
+      relativePath: episode.relativePath || '',
+      currentTime: safeCurrentTime,
+      duration: safeDuration,
+      progress: safeDuration > 0 ? Math.max(0, Math.min(100, Math.round((safeCurrentTime / safeDuration) * 100))) : episode.progress || 0,
+      updatedAt: new Date().toISOString()
+    };
+    localStorage.setItem(playbackProgressStorageKey, JSON.stringify(parsed));
+  } catch {
+    // Local resume cache is best effort; backend progress is still the source of truth.
+  }
+}
+
+function savedOrLocalEpisodeTime(album: Album | null | undefined, episode: Episode | null | undefined) {
+  const serverTime = savedEpisodeTime(album, episode);
+  const localTime = readLocalPlaybackProgress(album, episode)?.currentTime || 0;
+  return Math.max(serverTime, localTime);
 }
 
 function cvInitial(name: string) {
@@ -331,7 +392,7 @@ export function App() {
   const displayedPlayerEpisode = playerEpisode || currentEpisode;
   const savedDuration = savedEpisodeDuration(displayedPlayerAlbum, displayedPlayerEpisode);
   const displayedDuration = audioDuration || savedDuration;
-  const displayedTime = audioTime || savedEpisodeTime(displayedPlayerAlbum, displayedPlayerEpisode);
+  const displayedTime = audioTime || savedOrLocalEpisodeTime(displayedPlayerAlbum, displayedPlayerEpisode);
   const audioProgress =
     displayedDuration > 0 ? Math.min(100, Math.round((displayedTime / displayedDuration) * 100)) : displayedPlayerEpisode?.progress || 0;
 
@@ -363,8 +424,10 @@ export function App() {
       setAudioDuration(0);
       audio.onloadedmetadata = () => {
         const duration = audio.duration || 0;
+        const localProgress = readLocalPlaybackProgress(album, episode);
         const resumeTime =
           savedEpisodeTime(album, episode) ||
+          localProgress?.currentTime ||
           (duration > 0 && episode.progress && episode.progress > 0 && episode.progress < 100 ? (duration * episode.progress) / 100 : 0);
         setAudioDuration(duration);
         if (duration > 0 && resumeTime > 0 && resumeTime < duration - 1) {
@@ -409,11 +472,12 @@ export function App() {
     const audio = audioRef.current;
     if (!displayedPlayerAlbum || !displayedPlayerEpisode || !audio) return;
     const now = Date.now();
-    if (!force && now - lastProgressSaveRef.current < 5000) return;
+    if (!force && now - lastProgressSaveRef.current < 3000) return;
     lastProgressSaveRef.current = now;
     const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : savedEpisodeDuration(displayedPlayerAlbum, displayedPlayerEpisode);
     const currentTime = Number.isFinite(audio.currentTime) ? audio.currentTime : savedEpisodeTime(displayedPlayerAlbum, displayedPlayerEpisode);
     if (currentTime <= 0 && duration <= 0 && !force) return;
+    saveLocalPlaybackProgress(displayedPlayerAlbum, displayedPlayerEpisode, currentTime || 0, duration || 0);
     try {
       const nextAlbum = await updateEpisodeProgress(displayedPlayerAlbum.id, displayedPlayerEpisode.id, currentTime || 0, duration || 0);
       patchAlbumInState(nextAlbum);
@@ -429,6 +493,23 @@ export function App() {
     setAudioTime(audio.currentTime);
     void savePlaybackProgress(true);
   }
+
+  useEffect(() => {
+    function flushPlaybackProgress() {
+      void savePlaybackProgress(true);
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === 'hidden') flushPlaybackProgress();
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('beforeunload', flushPlaybackProgress);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('beforeunload', flushPlaybackProgress);
+    };
+  });
 
   async function handleScan() {
     try {
@@ -678,6 +759,7 @@ export function App() {
               onScanNas={handleScan}
               onAddCategory={handleAddCategory}
               onAnalyzeLibrary={handleAnalyzeLibraryMetadata}
+              onAlbumUpdated={patchAlbumInState}
               onOpen={setSelectedAlbum}
             />
           ) : null}
@@ -1596,6 +1678,7 @@ function MeView({
   onScanNas,
   onAddCategory,
   onAnalyzeLibrary,
+  onAlbumUpdated,
   onOpen
 }: {
   nas: NasConfig | null;
@@ -1609,6 +1692,7 @@ function MeView({
   onScanNas: () => Promise<void>;
   onAddCategory: (name: string) => Promise<void>;
   onAnalyzeLibrary: (mode?: MetadataAnalyzeMode) => Promise<void>;
+  onAlbumUpdated: (album: Album) => void;
   onOpen: (album: Album) => void;
 }) {
   const [categoryName, setCategoryName] = useState('');
@@ -1620,6 +1704,10 @@ function MeView({
   const [selectedAnalyzeMode, setSelectedAnalyzeMode] = useState<MetadataAnalyzeMode>('missing-only');
   const [metadataEstimate, setMetadataEstimate] = useState<MetadataAnalyzeEstimate | null>(null);
   const [isEstimatingMetadata, setIsEstimatingMetadata] = useState(false);
+  const [aiPendingItems, setAiPendingItems] = useState<AiPendingMetadata[]>([]);
+  const [isLoadingAiPending, setIsLoadingAiPending] = useState(false);
+  const [busyAiPendingId, setBusyAiPendingId] = useState('');
+  const [aiPendingError, setAiPendingError] = useState('');
   const isAnalyzingLibrary = metadataAnalyzeJob?.status === 'queued' || metadataAnalyzeJob?.status === 'running';
   const metadataAnalyzePercent = metadataAnalyzeJob?.total
     ? Math.round((metadataAnalyzeJob.processed / metadataAnalyzeJob.total) * 100)
@@ -1634,7 +1722,20 @@ function MeView({
     fetchProfile()
       .then((profile) => setAvatar(profile.avatar || ''))
       .catch(() => setAvatar(''));
+    void loadAiPendingItems();
   }, []);
+
+  async function loadAiPendingItems() {
+    setIsLoadingAiPending(true);
+    setAiPendingError('');
+    try {
+      setAiPendingItems(await fetchAiPendingMetadata());
+    } catch (error) {
+      setAiPendingError(error instanceof Error ? error.message : 'AI 待确认加载失败');
+    } finally {
+      setIsLoadingAiPending(false);
+    }
+  }
 
   async function submitCategory(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1688,6 +1789,55 @@ function MeView({
   async function confirmAnalyzeLibrary() {
     setIsAnalyzeDialogOpen(false);
     await onAnalyzeLibrary(selectedAnalyzeMode);
+    void loadAiPendingItems();
+  }
+
+  async function handleApprovePending(item: AiPendingMetadata) {
+    setBusyAiPendingId(item.id);
+    setAiPendingError('');
+    try {
+      const result = await approveAiPendingMetadata(item.id);
+      setAiPendingItems((current) => current.filter((pending) => pending.id !== item.id));
+      onAlbumUpdated(result.album);
+      onOpen(result.album);
+    } catch (error) {
+      setAiPendingError(error instanceof Error ? error.message : 'AI 资料批准失败');
+    } finally {
+      setBusyAiPendingId('');
+    }
+  }
+
+  async function handleRejectPending(item: AiPendingMetadata) {
+    setBusyAiPendingId(item.id);
+    setAiPendingError('');
+    try {
+      await rejectAiPendingMetadata(item.id);
+      setAiPendingItems((current) => current.filter((pending) => pending.id !== item.id));
+    } catch (error) {
+      setAiPendingError(error instanceof Error ? error.message : 'AI 资料拒绝失败');
+    } finally {
+      setBusyAiPendingId('');
+    }
+  }
+
+  async function handleResearchPending(item: AiPendingMetadata) {
+    setBusyAiPendingId(item.id);
+    setAiPendingError('');
+    try {
+      const result = await researchAiPendingMetadata(item.id);
+      if (result.autoApplied) {
+        setAiPendingItems((current) => current.filter((pending) => pending.id !== item.id));
+        onAlbumUpdated(result.album);
+        onOpen(result.album);
+      } else {
+        setAiPendingItems((current) => current.map((pending) => (pending.id === item.id ? result.item : pending)));
+        onAlbumUpdated(result.album);
+      }
+    } catch (error) {
+      setAiPendingError(error instanceof Error ? error.message : 'AI 资料重新搜索失败');
+    } finally {
+      setBusyAiPendingId('');
+    }
   }
 
   const myTools: Array<{ icon: SketchIconName; label: string; note: string }> = [
@@ -1712,8 +1862,6 @@ function MeView({
       value.toLowerCase().includes(q)
     );
   });
-  const pendingAiAlbums = albums.filter((album) => album.aiMetaStatus === 'suggested');
-
   return (
     <section className="me-page">
       <div className="me-top-actions">
@@ -1905,19 +2053,65 @@ function MeView({
       ) : null}
 
       <section className="ai-review-panel">
-        <SectionHeader title="AI 待确认" subtitle={`${pendingAiAlbums.length} 部`} />
-        <div className="ai-review-list">
-          {pendingAiAlbums.slice(0, 6).map((album) => (
-            <button key={album.id} onClick={() => onOpen(album)}>
-              <span className="mini-cover" style={{ background: coverBackground(album.cover) }} />
-              <span>
-                <strong>{album.title}</strong>
-                <small>{[album.author, album.cast?.[0], ...(album.genres || [])].filter(Boolean).slice(0, 3).join(' · ') || '资料需要你确认'}</small>
-              </span>
-              <em>确认</em>
-            </button>
-          ))}
-          {!pendingAiAlbums.length ? <p>暂时没有需要确认的 AI 资料。</p> : null}
+        <SectionHeader title="AI 待确认" subtitle={isLoadingAiPending ? '读取中' : `${aiPendingItems.length} 条`} />
+        <div className="ai-review-toolbar">
+          <button onClick={() => void loadAiPendingItems()} disabled={isLoadingAiPending}>
+            刷新
+          </button>
+        </div>
+        {aiPendingError ? <p className="ai-review-error">{aiPendingError}</p> : null}
+        <div className="ai-pending-list">
+          {aiPendingItems.map((item) => {
+            const album = albums.find((current) => current.id === item.albumId);
+            const metadata = item.metadata;
+            const confidence = Number(metadata.confidence || 0);
+            const chips = [
+              metadata.author,
+              ...(metadata.cast || []),
+              metadata.relationship,
+              metadata.audience,
+              metadata.finishStatus,
+              ...(metadata.genres || [])
+            ]
+              .filter(Boolean)
+              .slice(0, 8);
+            return (
+              <article key={item.id} className="ai-pending-card">
+                <div className="ai-pending-main">
+                  <span className="mini-cover" style={{ background: coverBackground(album?.cover) }} />
+                  <div>
+                    <strong>{item.title}</strong>
+                    <small>{item.reason || '需要确认后写入'}</small>
+                  </div>
+                  <em>{Math.round(confidence * 100)}%</em>
+                </div>
+                {metadata.summary || metadata.description ? <p>{metadata.summary || metadata.description}</p> : <p>AI 没有确认到可靠简介。</p>}
+                <div className="ai-pending-chips">
+                  {chips.length ? chips.map((chip) => <i key={String(chip)}>{String(chip)}</i>) : <i>缺少可确认标签</i>}
+                </div>
+                <div className="ai-pending-sources">
+                  {(item.sources || []).slice(0, 3).map((source, index) => (
+                    <a key={source} href={source} target="_blank" rel="noreferrer">
+                      来源 {index + 1}
+                    </a>
+                  ))}
+                  {!item.sources?.length ? <span>没有来源，不会自动写入</span> : null}
+                </div>
+                <div className="ai-pending-actions">
+                  <button disabled={busyAiPendingId === item.id} onClick={() => void handleApprovePending(item)}>
+                    批准写入
+                  </button>
+                  <button disabled={busyAiPendingId === item.id} onClick={() => void handleResearchPending(item)}>
+                    重新搜索
+                  </button>
+                  <button disabled={busyAiPendingId === item.id} onClick={() => void handleRejectPending(item)}>
+                    拒绝
+                  </button>
+                </div>
+              </article>
+            );
+          })}
+          {!aiPendingItems.length ? <p className="ai-review-empty">暂时没有需要确认的 AI 资料。</p> : null}
         </div>
       </section>
 
