@@ -160,6 +160,18 @@ export async function updateAlbumCover(albumId: string, cover: string): Promise<
   return data.album;
 }
 
+export async function uploadAlbumCover(albumId: string, file: File): Promise<Album> {
+  const formData = new FormData();
+  formData.append('cover', file);
+  const response = await fetch(`/api/albums/${albumId}/cover/upload`, {
+    method: 'POST',
+    body: formData
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || '封面上传失败');
+  return data.album;
+}
+
 export async function updateAlbumMetadata(albumId: string, metadata: Partial<Album>): Promise<Album> {
   const response = await fetch(`/api/albums/${albumId}/metadata`, {
     method: 'PATCH',

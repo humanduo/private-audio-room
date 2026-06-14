@@ -1497,6 +1497,58 @@ function safeFileName(value: string) {
   return value.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
 }
 
+const coverUploadMimeToExtension: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/webp': 'webp'
+};
+const maxCoverUploadBytes = 10 * 1024 * 1024;
+
+async function readRequestBody(req: express.Request, maxBytes: number) {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > maxBytes) throw new Error('封面文件不能超过 10MB');
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks);
+}
+
+async function parseCoverMultipart(req: express.Request) {
+  const contentType = String(req.headers['content-type'] || '');
+  const boundary = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i)?.[1] || contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i)?.[2];
+  if (!contentType.includes('multipart/form-data') || !boundary) throw new Error('请求必须是 multipart/form-data');
+
+  const body = await readRequestBody(req, maxCoverUploadBytes + 1024 * 1024);
+  const boundaryBuffer = Buffer.from(`--${boundary}`);
+  let position = body.indexOf(boundaryBuffer);
+  while (position >= 0) {
+    const nextPosition = body.indexOf(boundaryBuffer, position + boundaryBuffer.length);
+    if (nextPosition < 0) break;
+    let part = body.subarray(position + boundaryBuffer.length, nextPosition);
+    if (part.subarray(0, 2).toString() === '\r\n') part = part.subarray(2);
+    if (part.subarray(-2).toString() === '\r\n') part = part.subarray(0, -2);
+    const headerEnd = part.indexOf(Buffer.from('\r\n\r\n'));
+    if (headerEnd >= 0) {
+      const headers = part.subarray(0, headerEnd).toString('utf8');
+      const isCoverField = /content-disposition:[^\n]*name="cover"/i.test(headers);
+      if (isCoverField) {
+        const mimeType = headers.match(/content-type:\s*([^\r\n]+)/i)?.[1]?.trim().toLowerCase() || '';
+        const buffer = part.subarray(headerEnd + 4);
+        if (!coverUploadMimeToExtension[mimeType]) throw new Error(`不支持的封面格式：${mimeType || '未知格式'}`);
+        if (!buffer.length) throw new Error('封面文件为空');
+        if (buffer.length > maxCoverUploadBytes) throw new Error('封面文件不能超过 10MB');
+        return { buffer, mimeType, size: buffer.length, extension: coverUploadMimeToExtension[mimeType] };
+      }
+    }
+    position = nextPosition;
+  }
+  throw new Error('没有收到 cover 文件字段');
+}
+
 function stableId(value: string, length = 18) {
   return crypto.createHash('sha1').update(value).digest('base64url').slice(0, length);
 }
@@ -2071,6 +2123,42 @@ app.post('/api/playback-progress', (req, res) => {
   console.log(`[player] save progress relativePath=${progress.relativePath} currentTime=${Math.round(progress.currentTime)}`);
   writeState(state);
   res.json({ progress, album: nextAlbum });
+});
+
+app.post('/api/albums/:id/cover/upload', async (req, res) => {
+  const state = readState();
+  const albumIndex = state.albums.findIndex((item) => item.id === req.params.id);
+  if (albumIndex < 0) return res.status(404).json({ error: 'Album not found' });
+
+  let savePath = '';
+  let mimeType = '';
+  let size = 0;
+  try {
+    const parsed = await parseCoverMultipart(req);
+    mimeType = parsed.mimeType;
+    size = parsed.size;
+    fs.mkdirSync(coversDir, { recursive: true });
+    const fileName = `${safeFileName(req.params.id)}.${parsed.extension}`;
+    savePath = path.join(coversDir, fileName);
+    fs.writeFileSync(savePath, parsed.buffer);
+    const coverUpdatedAt = Date.now();
+    const cover = `/covers/${fileName}?v=${coverUpdatedAt}`;
+    state.albums[albumIndex] = {
+      ...state.albums[albumIndex],
+      cover,
+      coverUpdatedAt,
+      updatedAt: '刚刚整理'
+    };
+    writeState(state);
+    console.log(`[cover-upload] saved albumId=${req.params.id} mimeType=${mimeType} size=${size} savePath=${savePath}`);
+    res.json({ album: state.albums[albumIndex], cover, coverUpdatedAt });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : '封面上传失败';
+    console.error(
+      `[cover-upload] failed albumId=${req.params.id} mimeType=${mimeType || 'unknown'} size=${size || 0} savePath=${savePath || 'n/a'} errorMessage=${errorMessage}`
+    );
+    res.status(400).json({ error: errorMessage });
+  }
 });
 
 app.patch('/api/albums/:id/cover', (req, res) => {

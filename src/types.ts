@@ -20,6 +20,7 @@ export type Album = {
   title: string;
   subtitle: string;
   cover: string;
+  coverUpdatedAt?: number;
   creator: string;
   status: 'new' | 'listening' | 'finished';
   progress: number;

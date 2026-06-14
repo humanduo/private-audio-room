@@ -41,6 +41,7 @@ import {
   updateEpisodeProgress,
   updateAlbumCover,
   updateAlbumMetadata,
+  uploadAlbumCover,
   updateProfileAvatar
 } from './api';
 import type {
@@ -623,6 +624,21 @@ export function App() {
     setNotice('封面已保存');
   }
 
+  async function handleCoverUpload(albumId: string, file: File) {
+    try {
+      setNotice('正在上传封面...');
+      const updatedAlbum = await uploadAlbumCover(albumId, file);
+      setAlbums((current) => current.map((album) => (album.id === albumId ? updatedAlbum : album)));
+      setSelectedAlbum((current) => (current?.id === albumId ? updatedAlbum : current));
+      setPlayerAlbum((current) => (current?.id === albumId ? updatedAlbum : current));
+      setNotice('封面已保存');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      setNotice(`封面上传失败：${message}`);
+      throw error;
+    }
+  }
+
   async function handleGenerateCover(albumId: string) {
     try {
       setNotice('正在生成 AI 封面...');
@@ -779,6 +795,7 @@ export function App() {
             onClose={() => setSelectedAlbum(null)}
             onOpenAlbum={setSelectedAlbum}
             onCoverChange={handleCoverChange}
+            onCoverUpload={handleCoverUpload}
             onGenerateCover={handleGenerateCover}
             onMetadataChange={handleMetadataChange}
             onAnalyzeMetadata={handleAnalyzeMetadata}
@@ -2150,6 +2167,7 @@ function AlbumDrawer({
   onClose,
   onOpenAlbum,
   onCoverChange,
+  onCoverUpload,
   onGenerateCover,
   onMetadataChange,
   onAnalyzeMetadata,
@@ -2171,6 +2189,7 @@ function AlbumDrawer({
   onClose: () => void;
   onOpenAlbum: (album: Album) => void;
   onCoverChange: (albumId: string, cover: string) => Promise<void>;
+  onCoverUpload: (albumId: string, file: File) => Promise<void>;
   onGenerateCover: (albumId: string) => Promise<void>;
   onMetadataChange: (albumId: string, metadata: Partial<Album>) => Promise<void>;
   onAnalyzeMetadata: (albumId: string) => Promise<{ metadata: Partial<Album> & { confidence?: number; needsReview?: boolean }; album: Album }>;
@@ -2300,19 +2319,13 @@ function AlbumDrawer({
   async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
-    if (!file.type.startsWith('image/')) return;
-
-    const reader = new FileReader();
-    reader.onload = async () => {
-      if (typeof reader.result !== 'string') return;
-      setIsSavingCover(true);
-      try {
-        await onCoverChange(album.id, reader.result);
-      } finally {
-        setIsSavingCover(false);
-      }
-    };
-    reader.readAsDataURL(file);
+    setIsSavingCover(true);
+    try {
+      await onCoverUpload(album.id, file);
+    } finally {
+      setIsSavingCover(false);
+      event.target.value = '';
+    }
   }
 
   async function toggleFavorite(folderId: string) {
@@ -2536,7 +2549,7 @@ function AlbumDrawer({
               ) : null}
               <div className="cover-tools">
                 <label className="cover-upload">
-                  <input type="file" accept="image/*" onChange={handleFileChange} />
+                  <input type="file" accept="image/png,image/jpeg,image/jpg,image/webp" onChange={handleFileChange} />
                   {isSavingCover ? '保存中...' : '更换封面'}
                 </label>
                 <button
