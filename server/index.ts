@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultCategories, defaultNasConfig, mockAlbums } from './mockData';
-import type { Album, AlbumRecommendation, AppConfig, Category, FavoriteFolder, MediaKind, NasConfig, UserProfile } from './types';
+import type { Album, AlbumRecommendation, AppConfig, Category, Episode, FavoriteFolder, MediaKind, NasConfig, UserProfile } from './types';
 
 const app = express();
 const port = Number(process.env.PORT || 8787);
@@ -173,6 +173,11 @@ function cleanMetadataTags(values: unknown[]) {
   return uniqueStrings(values).filter((value) => !genericMetadataTags.has(value.toLowerCase()));
 }
 
+function finiteNumber(value: unknown, fallback = 0) {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : fallback;
+}
+
 function stringField(value: unknown, maxLength = 600) {
   return String(value || '').trim().slice(0, maxLength);
 }
@@ -310,6 +315,17 @@ function decodeDuckDuckGoUrl(value: string) {
   }
 }
 
+function decodeBingUrl(value: string) {
+  const url = decodeHtml(value);
+  try {
+    const parsed = new URL(url);
+    const target = parsed.searchParams.get('u');
+    return target ? decodeURIComponent(target) : parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 function resolveUrlMaybe(value: string, baseUrl: string) {
   try {
     return new URL(value, baseUrl).toString();
@@ -399,18 +415,41 @@ function seriesTitleForMetadata(title: string) {
 }
 
 async function searchMetadataQuery(query: string) {
-  const response = await fetch(`https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
-    headers: { 'User-Agent': 'Mozilla/5.0 PrivateAudioRoom/0.1' }
-  });
-  if (!response.ok) throw new Error(`metadata search failed: ${response.status}`);
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 PrivateAudioRoom/0.1',
+    Accept: 'text/html,application/xhtml+xml'
+  };
+  let duckStatus = 'error';
 
-  const html = await response.text();
-  return [...html.matchAll(/<a rel="nofollow" class="result__a" href="([^"]+)">([\s\S]*?)<\/a>[\s\S]*?<a class="result__snippet"[\s\S]*?>([\s\S]*?)<\/a>/g)]
+  try {
+    const duckResponse = await fetch(`https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`, { headers, signal: AbortSignal.timeout(9000) });
+    duckStatus = String(duckResponse.status);
+    if (duckResponse.ok) {
+      const html = await duckResponse.text();
+      const duckResults = [...html.matchAll(/<a rel="nofollow" class="result__a" href="([^"]+)">([\s\S]*?)<\/a>[\s\S]*?<a class="result__snippet"[\s\S]*?>([\s\S]*?)<\/a>/g)]
+        .slice(0, 5)
+        .map((match) => ({
+          title: cleanHtmlText(match[2]).slice(0, 120),
+          snippet: cleanHtmlText(match[3]).slice(0, 520),
+          url: decodeDuckDuckGoUrl(match[1]).slice(0, 300)
+        }))
+        .filter((item) => item.title || item.snippet);
+      if (duckResults.length) return duckResults;
+    }
+  } catch (error) {
+    duckStatus = error instanceof Error ? error.message : 'error';
+  }
+
+  const bingResponse = await fetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}`, { headers, signal: AbortSignal.timeout(9000) });
+  if (!bingResponse.ok) throw new Error(`metadata search failed: duck=${duckStatus} bing=${bingResponse.status}`);
+
+  const html = await bingResponse.text();
+  return [...html.matchAll(/<li class="b_algo"[\s\S]*?<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:<p[^>]*>([\s\S]*?)<\/p>)?/g)]
     .slice(0, 5)
     .map((match) => ({
       title: cleanHtmlText(match[2]).slice(0, 120),
       snippet: cleanHtmlText(match[3]).slice(0, 520),
-      url: decodeDuckDuckGoUrl(match[1]).slice(0, 300)
+      url: decodeBingUrl(match[1]).slice(0, 300)
     }))
     .filter((item) => item.title || item.snippet);
 }
@@ -453,10 +492,13 @@ async function analyzeAlbumMetadataWithDeepSeek(album: Album) {
 
   const model = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
   const baseUrl = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/chat/completions';
+  const webSearchEnabled = process.env.AI_METADATA_ALLOW_WEB_SEARCH !== 'false';
   const searchResults = await safeSearchAlbumMetadata(album);
   const searchContext = searchResults.length
     ? searchResults.map((item, index) => `${index + 1}. ${item.title}\n摘要：${item.snippet}\n来源：${item.url}`).join('\n\n')
-    : '没有搜索到可靠公开摘要。';
+    : webSearchEnabled
+      ? '没有搜索到可靠公开摘要。'
+      : '当前部署关闭了互联网搜索（AI_METADATA_ALLOW_WEB_SEARCH=false），只能根据剧名和已有信息保守整理。';
   const prompt = [
     '你是一个私人 NAS 广播剧资料整理助手。请根据“剧名/文件夹名”和“公开搜索摘要”整理广播剧元数据。',
     '不要根据分集标题推断整部剧资料。作者、配音演员必须优先来自公开搜索摘要；不确定时留空或降低 confidence，并设置 needsReview=true。',
@@ -728,6 +770,26 @@ async function runMetadataAnalyzeJob(jobId: string) {
 function mergeManualMetadata(scanned: Album[], existing: Album[]) {
   const existingById = new Map(existing.map((album) => [album.id, album]));
   const existingByTitle = new Map(existing.map((album) => [album.title, album]));
+
+  function mergeEpisodesWithPlayback(nextEpisodes: Episode[], previousEpisodes: Episode[]) {
+    const previousById = new Map(previousEpisodes.map((episode) => [episode.id, episode]));
+    const previousByPath = new Map(previousEpisodes.filter((episode) => episode.filePath).map((episode) => [episode.filePath, episode]));
+    const previousByTitle = new Map(previousEpisodes.map((episode) => [episode.title, episode]));
+
+    return nextEpisodes.map((episode) => {
+      const previous = previousById.get(episode.id) || previousByPath.get(episode.filePath || '') || previousByTitle.get(episode.title);
+      if (!previous) return episode;
+      return {
+        ...episode,
+        progress: finiteNumber(previous.progress, episode.progress || 0),
+        currentTime: finiteNumber(previous.currentTime, episode.currentTime || 0),
+        durationSeconds: finiteNumber(previous.durationSeconds, episode.durationSeconds || 0),
+        lastPlayedAt: previous.lastPlayedAt || episode.lastPlayedAt,
+        duration: previous.duration && previous.duration !== '--:--' ? previous.duration : episode.duration
+      };
+    });
+  }
+
   return scanned.map((album) => {
     const previous = existingById.get(album.id) || existingByTitle.get(album.title);
     if (!previous) return album;
@@ -737,7 +799,11 @@ function mergeManualMetadata(scanned: Album[], existing: Album[]) {
       ...album,
       cover: hasCustomCover ? previous.cover : album.cover,
       status: previous.status || album.status,
-      progress: previous.progress || album.progress,
+      progress: finiteNumber(previous.progress, album.progress),
+      currentEpisodeId: previous.currentEpisodeId || album.currentEpisodeId,
+      currentTime: finiteNumber(previous.currentTime, album.currentTime || 0),
+      durationSeconds: finiteNumber(previous.durationSeconds, album.durationSeconds || 0),
+      lastPlayedAt: previous.lastPlayedAt || album.lastPlayedAt,
       tags: cleanMetadataTags([...(album.tags || []), ...(previous.tags || []), ...(previous.genres || [])]),
       description: previous.description && previous.description !== `来自 NAS 目录：${album.title}` ? previous.description : album.description,
       author: previous.author || album.author,
@@ -748,7 +814,8 @@ function mergeManualMetadata(scanned: Album[], existing: Album[]) {
       audience: previous.audience || album.audience,
       finishStatus: previous.finishStatus || album.finishStatus,
       aiMetaStatus: previous.aiMetaStatus || album.aiMetaStatus,
-      aiMetaUpdatedAt: previous.aiMetaUpdatedAt || album.aiMetaUpdatedAt
+      aiMetaUpdatedAt: previous.aiMetaUpdatedAt || album.aiMetaUpdatedAt,
+      episodes: mergeEpisodesWithPlayback(album.episodes, previous.episodes || [])
     };
   });
 }
@@ -1258,20 +1325,37 @@ app.patch('/api/albums/:albumId/episodes/:episodeId/progress', (req, res) => {
   const episodeIndex = album.episodes.findIndex((item) => item.id === req.params.episodeId);
   if (episodeIndex < 0) return res.status(404).json({ error: 'Episode not found' });
 
-  const currentTime = Math.max(0, Number(req.body?.currentTime || 0));
-  const duration = Math.max(0, Number(req.body?.duration || 0));
-  const episodeProgress = duration > 0 ? Math.max(0, Math.min(100, Math.round((currentTime / duration) * 100))) : Number(album.episodes[episodeIndex].progress || 0);
-  const nextEpisodes = album.episodes.map((episode, index) => (index === episodeIndex ? { ...episode, progress: episodeProgress } : episode));
-  const albumProgress = nextEpisodes.length ? Math.round(nextEpisodes.reduce((sum, episode) => sum + Number(episode.progress || 0), 0) / nextEpisodes.length) : episodeProgress;
+  const now = nowIso();
+  const currentTime = Math.max(0, finiteNumber(req.body?.currentTime, 0));
+  const duration = Math.max(0, finiteNumber(req.body?.duration, 0));
+  const previousEpisode = album.episodes[episodeIndex];
+  const episodeProgress =
+    duration > 0 ? Math.max(0, Math.min(100, Math.round((currentTime / duration) * 100))) : finiteNumber(previousEpisode.progress, 0);
+  const nextEpisodes = album.episodes.map((episode, index) =>
+    index === episodeIndex
+      ? {
+          ...episode,
+          progress: episodeProgress,
+          currentTime,
+          durationSeconds: duration || episode.durationSeconds || 0,
+          lastPlayedAt: now
+        }
+      : episode
+  );
+  const allFinished = nextEpisodes.length > 0 && nextEpisodes.every((episode) => finiteNumber(episode.progress, 0) >= 100);
 
   state.albums = state.albums.map((item, index) => ({
     ...item,
-    status: index === albumIndex ? (albumProgress >= 100 ? 'finished' : 'listening') : item.status === 'listening' ? 'new' : item.status
+    status: index === albumIndex ? (allFinished ? 'finished' : 'listening') : item.status === 'listening' ? 'new' : item.status
   }));
   state.albums[albumIndex] = {
     ...state.albums[albumIndex],
     episodes: nextEpisodes,
-    progress: albumProgress,
+    currentEpisodeId: previousEpisode.id,
+    currentTime,
+    durationSeconds: duration || state.albums[albumIndex].durationSeconds || 0,
+    lastPlayedAt: now,
+    progress: episodeProgress,
     updatedAt: '刚刚播放'
   };
 

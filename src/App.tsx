@@ -162,6 +162,31 @@ function albumChips(album: Album, limit = 4) {
   );
 }
 
+function activeEpisodeForAlbum(album?: Album | null) {
+  if (!album) return undefined;
+  return (
+    album.episodes.find((episode) => episode.id === album.currentEpisodeId) ||
+    album.episodes.find((episode) => (episode.currentTime || 0) > 0 && (episode.progress || 0) < 100) ||
+    album.episodes.find((episode) => (episode.progress || 0) > 0 && (episode.progress || 0) < 100) ||
+    album.episodes.find((episode) => episode.filePath && (episode.progress || 0) < 100) ||
+    album.episodes.find((episode) => episode.filePath) ||
+    album.episodes[0]
+  );
+}
+
+function episodeNumber(album: Album, episode?: Episode | null) {
+  if (!episode) return 1;
+  return Math.max(1, album.episodes.findIndex((item) => item.id === episode.id) + 1);
+}
+
+function savedEpisodeTime(album: Album | null | undefined, episode: Episode | null | undefined) {
+  return Math.max(0, episode?.currentTime || (album?.currentEpisodeId === episode?.id ? album?.currentTime || 0 : 0));
+}
+
+function savedEpisodeDuration(album: Album | null | undefined, episode: Episode | null | undefined) {
+  return Math.max(0, episode?.durationSeconds || (album?.currentEpisodeId === episode?.id ? album?.durationSeconds || 0 : 0));
+}
+
 function cvInitial(name: string) {
   const first = name.trim()[0] || '#';
   if (/^[a-z]$/i.test(first)) return first.toUpperCase();
@@ -301,13 +326,17 @@ export function App() {
   }, [favoriteCvs]);
 
   const continueAlbum = useMemo(() => albums.find((album) => album.status === 'listening') || albums[0], [albums]);
-  const currentEpisode = continueAlbum?.episodes.find((episode) => (episode.progress || 0) < 100) || continueAlbum?.episodes[0];
+  const currentEpisode = activeEpisodeForAlbum(continueAlbum);
   const displayedPlayerAlbum = playerAlbum || continueAlbum;
   const displayedPlayerEpisode = playerEpisode || currentEpisode;
-  const audioProgress = audioDuration > 0 ? Math.min(100, Math.round((audioTime / audioDuration) * 100)) : displayedPlayerEpisode?.progress || 0;
+  const savedDuration = savedEpisodeDuration(displayedPlayerAlbum, displayedPlayerEpisode);
+  const displayedDuration = audioDuration || savedDuration;
+  const displayedTime = audioTime || savedEpisodeTime(displayedPlayerAlbum, displayedPlayerEpisode);
+  const audioProgress =
+    displayedDuration > 0 ? Math.min(100, Math.round((displayedTime / displayedDuration) * 100)) : displayedPlayerEpisode?.progress || 0;
 
   function nextPlayableEpisode(album: Album) {
-    return album.episodes.find((episode) => episode.filePath && (episode.progress || 0) < 100) || album.episodes.find((episode) => episode.filePath) || album.episodes[0];
+    return activeEpisodeForAlbum(album);
   }
 
   async function playAlbum(album: Album, episode = nextPlayableEpisode(album)) {
@@ -334,9 +363,12 @@ export function App() {
       setAudioDuration(0);
       audio.onloadedmetadata = () => {
         const duration = audio.duration || 0;
+        const resumeTime =
+          savedEpisodeTime(album, episode) ||
+          (duration > 0 && episode.progress && episode.progress > 0 && episode.progress < 100 ? (duration * episode.progress) / 100 : 0);
         setAudioDuration(duration);
-        if (duration > 0 && episode.progress && episode.progress > 0 && episode.progress < 100) {
-          audio.currentTime = Math.max(0, Math.min(duration - 1, (duration * episode.progress) / 100));
+        if (duration > 0 && resumeTime > 0 && resumeTime < duration - 1) {
+          audio.currentTime = Math.max(0, Math.min(duration - 1, resumeTime));
           setAudioTime(audio.currentTime);
         }
       };
@@ -375,12 +407,15 @@ export function App() {
 
   async function savePlaybackProgress(force = false) {
     const audio = audioRef.current;
-    if (!displayedPlayerAlbum || !displayedPlayerEpisode || !audio || !audio.duration) return;
+    if (!displayedPlayerAlbum || !displayedPlayerEpisode || !audio) return;
     const now = Date.now();
     if (!force && now - lastProgressSaveRef.current < 5000) return;
     lastProgressSaveRef.current = now;
+    const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : savedEpisodeDuration(displayedPlayerAlbum, displayedPlayerEpisode);
+    const currentTime = Number.isFinite(audio.currentTime) ? audio.currentTime : savedEpisodeTime(displayedPlayerAlbum, displayedPlayerEpisode);
+    if (currentTime <= 0 && duration <= 0 && !force) return;
     try {
-      const nextAlbum = await updateEpisodeProgress(displayedPlayerAlbum.id, displayedPlayerEpisode.id, audio.currentTime || 0, audio.duration || 0);
+      const nextAlbum = await updateEpisodeProgress(displayedPlayerAlbum.id, displayedPlayerEpisode.id, currentTime || 0, duration || 0);
       patchAlbumInState(nextAlbum);
     } catch {
       // Playback should not be interrupted if progress persistence fails.
@@ -390,7 +425,7 @@ export function App() {
   function seekAudio(nextTime: number) {
     const audio = audioRef.current;
     if (!audio || !Number.isFinite(nextTime)) return;
-    audio.currentTime = Math.max(0, Math.min(nextTime, audioDuration || nextTime));
+    audio.currentTime = Math.max(0, Math.min(nextTime, displayedDuration || nextTime));
     setAudioTime(audio.currentTime);
     void savePlaybackProgress(true);
   }
@@ -799,13 +834,12 @@ function HomeView({
   const hero = currentAlbum || albums.find((album) => album.status === 'listening') || albums[0];
   const heroProgress = currentAlbum?.id === hero?.id ? audioProgress : hero?.progress || 0;
   const isHeroCurrent = Boolean(hero && currentAlbum?.id === hero.id);
-  const heroEpisode =
-    isHeroCurrent && currentEpisode
-      ? currentEpisode
-      : hero?.episodes.find((episode) => (episode.progress || 0) > 0 && (episode.progress || 0) < 100) ||
-        hero?.episodes.find((episode) => (episode.progress || 0) < 100) ||
-        hero?.episodes[0];
-  const heroEpisodeLabel = heroEpisode?.title ? `正在听 ${heroEpisode.title}` : hero?.subtitle || '连接 NAS 后扫描本地音频，就会出现在这里。';
+  const heroEpisode = isHeroCurrent && currentEpisode ? currentEpisode : activeEpisodeForAlbum(hero);
+  const heroTime = isHeroCurrent ? audioTime || savedEpisodeTime(hero, heroEpisode) : savedEpisodeTime(hero, heroEpisode);
+  const heroDuration = isHeroCurrent ? audioDuration || savedEpisodeDuration(hero, heroEpisode) : savedEpisodeDuration(hero, heroEpisode);
+  const heroEpisodeLabel = hero && heroEpisode?.title
+    ? `正在听 第 ${String(episodeNumber(hero, heroEpisode)).padStart(2, '0')} 集 · ${heroEpisode.title}`
+    : hero?.subtitle || '连接 NAS 后扫描本地音频，就会出现在这里。';
 
   if (isLoading) {
     return <div className="empty-state">正在整理你的私人听书房...</div>;
@@ -847,15 +881,15 @@ function HomeView({
               <input
                 type="range"
                 min="0"
-                max={audioDuration || 0}
+                max={heroDuration || 0}
                 step="1"
-                value={audioDuration ? audioTime : 0}
-                disabled={!audioDuration || currentAlbum?.id !== hero.id}
+                value={heroDuration ? heroTime : 0}
+                disabled={!heroDuration || currentAlbum?.id !== hero.id}
                 onClick={(event) => event.stopPropagation()}
                 onChange={(event) => onSeek(Number(event.currentTarget.value))}
               />
               <small>
-                已播放 {heroProgress}% {audioDuration ? `· ${formatClock(audioTime)} / ${formatClock(audioDuration)}` : ''}
+                已播放 {heroProgress}% {heroDuration ? `· ${formatClock(heroTime)} / ${formatClock(heroDuration)}` : ''}
               </small>
             </label>
           ) : null}
@@ -1005,8 +1039,10 @@ function DramaListRow({
   onOpen: (album: Album) => void;
   onPlay: (album: Album, episode?: Episode) => void;
 }) {
-  const nextEpisode = album.episodes.find((episode) => (episode.progress || 0) < 100) || album.episodes[0];
-  const lastIndex = nextEpisode ? Math.max(1, album.episodes.findIndex((episode) => episode.id === nextEpisode.id) + 1) : 1;
+  const currentEpisode = activeEpisodeForAlbum(album);
+  const lastIndex = episodeNumber(album, currentEpisode);
+  const currentTime = savedEpisodeTime(album, currentEpisode);
+  const duration = savedEpisodeDuration(album, currentEpisode);
 
   return (
     <article className="drama-row">
@@ -1025,6 +1061,7 @@ function DramaListRow({
           ) : null}
           <em>
             已播放 <b>{album.progress}%</b> · 上次听到 <b>第 {String(lastIndex).padStart(2, '0')} 集</b>
+            {duration ? ` · ${formatClock(currentTime)} / ${formatClock(duration)}` : ''}
           </em>
           <span className="drama-row-progress">
             <i style={{ width: `${album.progress}%` }} />
@@ -1970,7 +2007,7 @@ function AlbumDrawer({
   });
   const activeEpisode =
     album.episodes.find((episode) => episode.id === currentEpisodeId) ||
-    album.episodes.find((episode) => (episode.progress || 0) < 100) ||
+    activeEpisodeForAlbum(album) ||
     album.episodes[0];
   const activeEpisodeIndex = Math.max(
     0,

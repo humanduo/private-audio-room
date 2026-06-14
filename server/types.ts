@@ -6,6 +6,9 @@ export type Episode = {
   duration: string;
   filePath?: string;
   progress?: number;
+  currentTime?: number;
+  durationSeconds?: number;
+  lastPlayedAt?: string;
   isPreview?: boolean;
 };
 
@@ -29,6 +32,10 @@ export type Album = {
   relationship?: string;
   audience?: string;
   finishStatus?: string;
+  currentEpisodeId?: string;
+  currentTime?: number;
+  durationSeconds?: number;
+  lastPlayedAt?: string;
   aiMetaStatus?: 'none' | 'suggested' | 'saved' | 'failed';
   aiMetaUpdatedAt?: string;
   episodes: Episode[];
