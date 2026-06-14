@@ -45,10 +45,14 @@ services:
       PORT: "8787"
       AUDIO_ROOT: /media/audio
       PUBLIC_APP_URL: https://audio.307167312.xyz
-      OPENAI_API_KEY: ""
-      OPENAI_IMAGE_MODEL: gpt-image-1
-      AUTO_GENERATE_COVERS: "false"
-      MAX_AUTO_GENERATED_COVERS_PER_SCAN: "8"
+      DEEPSEEK_API_KEY: ""
+      DEEPSEEK_MODEL: deepseek-chat
+      DEEPSEEK_BASE_URL: https://api.deepseek.com/chat/completions
+      AI_METADATA_PROVIDER: deepseek
+      AI_METADATA_AUTO_APPROVE: "true"
+      AI_METADATA_REQUIRE_REVIEW: "false"
+      AI_METADATA_OVERWRITE_POLICY: empty-first
+      AI_METADATA_BATCH_LIMIT: "50"
     volumes:
       - /Audio:/media/audio:ro
       - /docker/private-audio-room/data:/app/data

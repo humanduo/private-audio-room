@@ -650,7 +650,7 @@ export function App() {
       setAlbums((current) => current.map((album) => (album.id === albumId ? result.album : album)));
       setSelectedAlbum((current) => (current?.id === albumId ? result.album : current));
       setPlayerAlbum((current) => (current?.id === albumId ? result.album : current));
-      setNotice(result.metadata.needsReview ? 'DeepSeek 已整理，已加入待确认' : 'DeepSeek 已保存资料');
+      setNotice(result.metadata.needsReview ? 'DeepSeek 已整理，已加入待确认' : 'DeepSeek 已整理');
       return result;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'DeepSeek 资料整理失败');
@@ -665,7 +665,7 @@ export function App() {
       setAlbums(result.albums.filter((album) => album.kind === activeKind));
       setSelectedAlbum((current) => (current ? result.albums.find((album) => album.id === current.id) || current : current));
       setPlayerAlbum((current) => (current ? result.albums.find((album) => album.id === current.id) || current : current));
-      setNotice(`全库整理完成：成功 ${result.job.updated} 部，失败 ${result.job.failed} 部`);
+      setNotice(`全库整理完成：成功 ${result.job.updated} 部，跳过 ${result.job.skipped || 0} 部，失败 ${result.job.failed} 部`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'DeepSeek 全库整理失败');
     }
@@ -1996,6 +1996,7 @@ function MeView({
             <span>总数 {metadataAnalyzeJob.total}</span>
             <span>已完成 {metadataAnalyzeJob.processed}</span>
             <span>成功 {metadataAnalyzeJob.updated}</span>
+            <span>跳过 {metadataAnalyzeJob.skipped || 0}</span>
             <span>失败 {metadataAnalyzeJob.failed}</span>
           </div>
           {metadataAnalyzeJob.status === 'completed' && metadataAnalyzeJob.failed > 0 ? (
@@ -2013,11 +2014,11 @@ function MeView({
                     if (album) onOpen(album);
                   }}
                 >
-                  <span className={result.ok ? (result.needsReview || result.aiMetaStatus === 'suggested' ? 'review' : 'ok') : 'fail'}>
-                    {result.ok ? (result.needsReview || result.aiMetaStatus === 'suggested' ? '待确认' : '成功') : '失败'}
+                  <span className={result.ok ? (result.skipped ? 'review' : result.needsReview || result.aiMetaStatus === 'suggested' ? 'review' : 'ok') : 'fail'}>
+                    {result.ok ? (result.skipped ? '跳过' : result.needsReview || result.aiMetaStatus === 'suggested' ? '待确认' : '成功') : '失败'}
                   </span>
                   <strong>{result.title}</strong>
-                  <small>{result.error || (result.needsReview || result.aiMetaStatus === 'suggested' ? '需要你检查资料' : '已保存')}</small>
+                  <small>{result.error || (result.skipped ? '手动资料已保留' : result.needsReview || result.aiMetaStatus === 'suggested' ? '需要你检查资料' : '已保存')}</small>
                 </button>
               ))}
             </div>

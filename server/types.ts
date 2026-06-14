@@ -35,6 +35,10 @@ export type Album = {
   audience?: string;
   finishStatus?: string;
   metadataSources?: string[];
+  metadataSource?: string;
+  metadataVerified?: boolean;
+  metadataUpdatedAt?: string;
+  metadataEditedManually?: boolean;
   currentEpisodeId?: string;
   currentTime?: number;
   durationSeconds?: number;

@@ -36,6 +36,10 @@ export type Album = {
   audience?: string;
   finishStatus?: string;
   metadataSources?: string[];
+  metadataSource?: string;
+  metadataVerified?: boolean;
+  metadataUpdatedAt?: string;
+  metadataEditedManually?: boolean;
   currentEpisodeId?: string;
   currentTime?: number;
   durationSeconds?: number;
@@ -119,8 +123,9 @@ export type MetadataAnalyzeJob = {
   processed: number;
   updated: number;
   failed: number;
+  skipped: number;
   currentAlbumTitle: string;
-  results: Array<{ id: string; title: string; ok: boolean; error?: string; needsReview?: boolean; aiMetaStatus?: string }>;
+  results: Array<{ id: string; title: string; ok: boolean; error?: string; needsReview?: boolean; aiMetaStatus?: string; skipped?: boolean }>;
   startedAt: string;
   finishedAt?: string;
   error?: string;
