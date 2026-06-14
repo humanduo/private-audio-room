@@ -1,4 +1,4 @@
-FROM node:20-alpine AS build
+FROM public.ecr.aws/docker/library/node:20-alpine AS build
 
 WORKDIR /app
 ENV NODE_ENV=development
@@ -11,7 +11,7 @@ COPY . .
 RUN npm exec -- tsc -b && npm exec -- vite build
 RUN npm prune --omit=dev --no-audit --no-fund
 
-FROM node:20-alpine AS runtime
+FROM public.ecr.aws/docker/library/node:20-alpine AS runtime
 
 WORKDIR /app
 ENV NODE_ENV=production
