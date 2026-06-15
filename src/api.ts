@@ -3,6 +3,7 @@ import type {
   AlbumRecommendation,
   AiPendingMetadata,
   Category,
+  CoverImportResult,
   Episode,
   FavoriteFolder,
   MediaKind,
@@ -225,6 +226,18 @@ export async function importMetadataTemplate(items: MetadataTemplateItem[]): Pro
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || '资料导入失败');
+  return data;
+}
+
+export async function importAlbumCoversZip(file: File): Promise<CoverImportResult> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const response = await fetch('/api/covers/import', {
+    method: 'POST',
+    body: formData
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || '批量封面导入失败');
   return data;
 }
 

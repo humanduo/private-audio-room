@@ -33,6 +33,7 @@ import {
   fetchNas,
   fetchProfile,
   generateAlbumCover,
+  importAlbumCoversZip,
   importMetadataTemplate,
   refreshCvAvatars,
   rejectAiPendingMetadata,
@@ -52,6 +53,7 @@ import type {
   AiPendingMetadata,
   AppView,
   Category,
+  CoverImportResult,
   Episode,
   FavoriteFolder,
   MediaKind,
@@ -1878,6 +1880,9 @@ function MeView({
   const [isImportingMetadata, setIsImportingMetadata] = useState(false);
   const [metadataTransferError, setMetadataTransferError] = useState('');
   const [metadataImportResult, setMetadataImportResult] = useState<MetadataImportResult | null>(null);
+  const [coverImportFile, setCoverImportFile] = useState<File | null>(null);
+  const [isImportingCovers, setIsImportingCovers] = useState(false);
+  const [coverImportResult, setCoverImportResult] = useState<CoverImportResult | null>(null);
   const isAnalyzingLibrary = metadataAnalyzeJob?.status === 'queued' || metadataAnalyzeJob?.status === 'running';
   const metadataAnalyzePercent = metadataAnalyzeJob?.total
     ? Math.round((metadataAnalyzeJob.processed / metadataAnalyzeJob.total) * 100)
@@ -2055,6 +2060,41 @@ function MeView({
     }
   }
 
+  function handleCoverImportFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] || null;
+    event.target.value = '';
+    setCoverImportResult(null);
+    setMetadataTransferError('');
+    if (!file) return;
+    const isZip =
+      file.name.toLowerCase().endsWith('.zip') ||
+      file.type === 'application/zip' ||
+      file.type === 'application/x-zip-compressed';
+    if (!isZip) {
+      setCoverImportFile(null);
+      setMetadataTransferError('请选择 .zip 封面包');
+      return;
+    }
+    setCoverImportFile(file);
+  }
+
+  async function handleImportCoversZip() {
+    if (!coverImportFile || isImportingCovers) return;
+    setIsImportingCovers(true);
+    setMetadataTransferError('');
+    setCoverImportResult(null);
+    try {
+      const result = await importAlbumCoversZip(coverImportFile);
+      setCoverImportResult(result);
+      setCoverImportFile(null);
+      await onMetadataImported();
+    } catch (error) {
+      setMetadataTransferError(error instanceof Error ? error.message : '批量封面导入失败');
+    } finally {
+      setIsImportingCovers(false);
+    }
+  }
+
   const myTools: Array<{ icon: SketchIconName; label: string; note: string }> = [
     { icon: 'timer', label: '定时关闭', note: '睡前播放' },
     { icon: 'chase', label: '我的追剧', note: '继续听' },
@@ -2146,6 +2186,26 @@ function MeView({
             <input type="file" accept=".json,application/json" disabled={isImportingMetadata} onChange={handleImportMetadataFile} />
           </label>
         </div>
+        <div className="cover-import-box">
+          <div>
+            <strong>批量导入封面</strong>
+            <span>{coverImportFile ? coverImportFile.name : '选择包含 manifest.json 的 .zip 封面包'}</span>
+          </div>
+          <div className="button-row">
+            <label className={isImportingCovers ? 'metadata-import-button disabled' : 'metadata-import-button'}>
+              选择 ZIP
+              <input
+                type="file"
+                accept=".zip,application/zip,application/x-zip-compressed"
+                disabled={isImportingCovers}
+                onChange={handleCoverImportFile}
+              />
+            </label>
+            <button className="filled" disabled={!coverImportFile || isImportingCovers} onClick={() => void handleImportCoversZip()}>
+              {isImportingCovers ? '导入中' : '上传并导入封面'}
+            </button>
+          </div>
+        </div>
         {metadataTransferError ? <p className="metadata-transfer-error">{metadataTransferError}</p> : null}
         {metadataImportResult ? (
           <div className="metadata-import-result">
@@ -2168,6 +2228,37 @@ function MeView({
             <small>{metadataImportResult.backupFile ? `已备份：${metadataImportResult.backupFile.split('/').pop()}` : '已尝试备份 state.json'}</small>
             {metadataImportResult.notMatched.length ? <em>未匹配：{metadataImportResult.notMatched.slice(0, 4).join('、')}</em> : null}
             {metadataImportResult.errors.length ? <em>错误：{metadataImportResult.errors.slice(0, 3).join('；')}</em> : null}
+          </div>
+        ) : null}
+        {coverImportResult ? (
+          <div className="metadata-import-result cover-import-result">
+            <div>
+              <span>总数</span>
+              <strong>{coverImportResult.total}</strong>
+            </div>
+            <div>
+              <span>导入</span>
+              <strong>{coverImportResult.imported}</strong>
+            </div>
+            <div>
+              <span>跳过</span>
+              <strong>{coverImportResult.skipped}</strong>
+            </div>
+            <div>
+              <span>未匹配</span>
+              <strong>{coverImportResult.notMatched.length}</strong>
+            </div>
+            <small>{coverImportResult.backupFile ? `已备份：${coverImportResult.backupFile.split('/').pop()}` : '已尝试备份 state.json'}</small>
+            {coverImportResult.notMatched.length ? <em>未匹配：{coverImportResult.notMatched.slice(0, 4).join('、')}</em> : null}
+            {coverImportResult.errors.length ? (
+              <em>
+                错误：
+                {coverImportResult.errors
+                  .slice(0, 3)
+                  .map((error) => `${error.originalTitle || error.fileName}：${error.message}`)
+                  .join('；')}
+              </em>
+            ) : null}
           </div>
         ) : null}
       </div>

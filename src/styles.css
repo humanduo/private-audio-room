@@ -1144,11 +1144,25 @@ button:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  box-sizing: border-box;
+  margin-bottom: 0;
+  padding: 0 12px;
   background: var(--accent);
-  color: white;
+  color: white !important;
   font-size: 13px;
   font-weight: 900;
+  line-height: 1;
+  text-align: center;
   cursor: pointer;
+}
+
+.settings-card .button-row .metadata-import-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 0;
+  color: white !important;
+  text-align: center;
 }
 
 .metadata-import-button input {
@@ -1163,6 +1177,41 @@ button:focus-visible {
 .metadata-transfer-error {
   color: #d83b4c !important;
   font-weight: 800;
+}
+
+.cover-import-box {
+  display: grid;
+  gap: 8px;
+  margin-top: 2px;
+  border-radius: 18px;
+  padding: 12px;
+  background: rgba(255, 247, 247, 0.72);
+}
+
+.cover-import-box > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.cover-import-box strong {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.cover-import-box span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cover-import-box button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .metadata-import-result {
@@ -1203,6 +1252,10 @@ button:focus-visible {
 .metadata-import-result em {
   grid-column: 1 / -1;
   line-height: 1.45;
+}
+
+.cover-import-result {
+  background: #f7fbff;
 }
 
 .file-hints {
