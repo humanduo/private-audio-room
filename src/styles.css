@@ -840,6 +840,19 @@ button:focus-visible {
   color: var(--accent);
 }
 
+.drama-row-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.drama-row-status time {
+  color: var(--text-tertiary);
+  font-style: normal;
+  white-space: nowrap;
+}
+
 .drama-row-progress {
   display: block;
   height: 4px;
@@ -3162,6 +3175,15 @@ button:focus-visible {
 }
 
 @media (max-width: 430px) {
+  .topbar {
+    margin-bottom: 10px;
+    padding-bottom: 12px;
+  }
+
+  .content-area {
+    padding-top: 2px;
+  }
+
   .panel-page .section-header {
     align-items: flex-start;
   }
@@ -3198,6 +3220,117 @@ button:focus-visible {
 
   .album-grid {
     gap: 10px;
+  }
+
+  .drama-list {
+    gap: 8px;
+  }
+
+  .drama-row {
+    min-height: 96px;
+    grid-template-columns: minmax(0, 1fr) 40px;
+    gap: 7px;
+    align-items: center;
+    padding: 8px 10px;
+    border-radius: 16px;
+  }
+
+  .drama-row-main {
+    grid-template-columns: clamp(104px, 32vw, 122px) minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+  }
+
+  .drama-row-cover {
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1.56;
+    border-radius: 11px;
+  }
+
+  .drama-row-copy {
+    position: relative;
+    min-height: 0;
+    height: 74px;
+    padding-bottom: 15px;
+    overflow: hidden;
+  }
+
+  .drama-row-copy strong {
+    min-height: 0;
+    max-height: 38px;
+    font-size: 16.5px;
+    line-height: 1.18;
+    text-align: left;
+  }
+
+  .drama-row-copy small {
+    min-height: 15px;
+    margin-top: 3px;
+    font-size: 11.5px;
+    line-height: 1.3;
+    color: var(--text-tertiary);
+    display: block;
+  }
+
+  .drama-row-summary {
+    display: block;
+    min-height: 15px;
+    max-height: 15px;
+    margin-top: 3px;
+    color: var(--text-tertiary);
+    font-size: 11.5px;
+    line-height: 1.3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .drama-row .metadata-chips.compact {
+    display: none;
+  }
+
+  .drama-row-copy em {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    min-height: 14px;
+    max-width: 84px;
+    font-size: 11px;
+    line-height: 1.2;
+    text-align: right;
+  }
+
+  .drama-row-status span {
+    display: none;
+  }
+
+  .drama-row-status time {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .drama-row-progress {
+    position: absolute;
+    left: 0;
+    right: 88px;
+    bottom: 4px;
+    height: 3px;
+    margin-top: 0;
+  }
+
+  .drama-play,
+  .inline-play {
+    width: 38px;
+    height: 38px;
+    box-shadow: 0 7px 16px rgba(255, 99, 112, 0.18);
+  }
+
+  .drama-play svg,
+  .inline-play svg {
+    width: 18px;
+    height: 18px;
   }
 
   .bottom-nav {

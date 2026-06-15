@@ -204,6 +204,22 @@ function episodeNumber(album: Album, episode?: Episode | null) {
   return Math.max(1, album.episodes.findIndex((item) => item.id === episode.id) + 1);
 }
 
+function splitAlbumListTitle(rawTitle: string) {
+  const normalizedTitle = rawTitle.replace(/[《》]/g, '').replace(/\s+/g, ' ').trim();
+  const withoutStatus = normalizedTitle.replace(/(?:[\s·.。_-]+)?完结$/u, '').trim();
+  const seasonMatch = withoutStatus.match(/^(.*?)(?:[\s·.。_-]+)?(第[一二三四五六七八九十百\d]+季|上季|下季)$/u);
+  if (seasonMatch?.[1]) {
+    return {
+      title: seasonMatch[1].trim(),
+      season: seasonMatch[2].trim()
+    };
+  }
+  return {
+    title: withoutStatus || normalizedTitle,
+    season: ''
+  };
+}
+
 function savedEpisodeTime(album: Album | null | undefined, episode: Episode | null | undefined) {
   return savedPlaybackSnapshot(album, episode).currentTime;
 }
@@ -1255,15 +1271,20 @@ function DramaListRow({
   const currentTime = saved.currentTime;
   const duration = saved.duration;
   const progress = saved.progress || album.progress || 0;
+  const hasPlaybackProgress = progress > 0 || currentTime >= 3;
+  const displayTitle = splitAlbumListTitle(album.title);
+  const episodePrefix = String(lastIndex).padStart(2, '0');
+  const seasonLine = [displayTitle.season, `共 ${album.episodes.length} 集`].filter(Boolean).join(' · ');
+  const progressLine = hasPlaybackProgress ? `已播放 第 ${episodePrefix} 集` : '尚未播放';
 
   return (
     <article className="drama-row">
       <button className="drama-row-main" onClick={() => onOpen(album)}>
         <span className="drama-row-cover" style={{ background: coverBackground(album.cover) }} />
         <span className="drama-row-copy">
-          <strong>{album.title}</strong>
-          <small>{album.author || album.cast?.[0] ? [album.author, album.cast?.[0]].filter(Boolean).join(' · ') : album.subtitle}</small>
-          <span className="drama-row-summary">{albumSummary(album)}</span>
+          <strong>{displayTitle.title}</strong>
+          <small className="drama-row-meta">{seasonLine || album.subtitle}</small>
+          <span className="drama-row-summary">{progressLine}</span>
           {albumChips(album, 3).length ? (
             <span className="metadata-chips compact">
               {albumChips(album, 3).map((chip) => (
@@ -1271,9 +1292,15 @@ function DramaListRow({
               ))}
             </span>
           ) : null}
-          <em>
-            已播放 <b>{progress}%</b> · 上次听到 <b>第 {String(lastIndex).padStart(2, '0')} 集</b>
-            {duration ? ` · ${formatClock(currentTime)} / ${formatClock(duration)}` : ''}
+          <em className="drama-row-status">
+            {hasPlaybackProgress ? (
+              <>
+                <span>已播放 <b>{progress}%</b></span>
+                {duration ? <time>{formatClock(currentTime)} / {formatClock(duration)}</time> : null}
+              </>
+            ) : (
+              <span>尚未播放</span>
+            )}
           </em>
           <span className="drama-row-progress">
             <i style={{ width: `${progress}%` }} />
