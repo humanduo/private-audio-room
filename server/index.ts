@@ -1,5 +1,6 @@
 import cors from 'cors';
 import express from 'express';
+import AdmZip from 'adm-zip';
 import crypto from 'node:crypto';
 import dns from 'node:dns/promises';
 import fs from 'node:fs';
@@ -12,6 +13,10 @@ import type {
   AlbumRecommendation,
   AppConfig,
   Category,
+  CoverImportAlbumResult,
+  CoverImportError,
+  CoverImportManifestItem,
+  CoverImportResult,
   Episode,
   FavoriteFolder,
   MediaKind,
@@ -515,6 +520,141 @@ function backupStateBeforeMetadataImport(state: AppState) {
     fs.writeFileSync(backupFile, JSON.stringify(state, null, 2));
   }
   return backupFile;
+}
+
+const coverImportSupportedExtensions = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+const maxCoverImportImageBytes = 10 * 1024 * 1024;
+const maxCoverImportZipBytes = 256 * 1024 * 1024;
+
+function backupStateBeforeCoverImport() {
+  const backupsDir = path.resolve('data/backups');
+  fs.mkdirSync(backupsDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, '').replace('T', '-');
+  const backupFile = path.join(backupsDir, `state-before-cover-import-${stamp}.json`);
+  if (fs.existsSync(stateFile)) fs.copyFileSync(stateFile, backupFile);
+  else fs.writeFileSync(backupFile, JSON.stringify({}, null, 2));
+  return path.basename(backupFile);
+}
+
+// Normalize a title for loose matching: trim, collapse whitespace, ignore
+// full-width/half-width space differences and minor punctuation.
+function normalizeCoverImportTitle(value: string) {
+  return stringField(value, 180)
+    .replace(/\u3000/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Build a comparison key that ignores consecutive whitespace differences and
+// full/half-width spaces, while keeping the rest of the characters intact.
+function coverImportMatchKey(value: string) {
+  return normalizeCoverImportTitle(value)
+    .toLowerCase()
+    .replace(/\s+/g, '');
+}
+
+// Reject unsafe zip entry names: absolute paths, parent traversal, or any
+// attempt to escape the archive root. Only the manifest's fileName is ever
+// read, and entries are validated against this check.
+function isUnsafeZipEntryName(entryName: string) {
+  if (!entryName) return true;
+  if (path.isAbsolute(entryName)) return true;
+  const normalized = path.normalize(entryName).replace(/\\/g, '/');
+  if (normalized.startsWith('..') || normalized.includes('/../') || normalized === '..') return true;
+  if (normalized === '__MACOSX' || normalized.startsWith('__MACOSX/') || normalized.includes('/__MACOSX/')) return true;
+  return false;
+}
+
+function parseCoverImportManifest(raw: unknown): CoverImportManifestItem[] {
+  let parsed: unknown;
+  try {
+    parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  } catch {
+    throw new Error('manifest.json 不是有效的 JSON');
+  }
+  if (!Array.isArray(parsed)) throw new Error('manifest.json 必须是数组');
+  return parsed.map((item, index) => {
+    if (!item || typeof item !== 'object') throw new Error(`manifest 第 ${index + 1} 条不是有效对象`);
+    const record = item as Record<string, unknown>;
+    const fileName = stringField(record.fileName, 200);
+    if (!fileName) throw new Error(`manifest 第 ${index + 1} 条缺少 fileName`);
+    const id = stringField(record.id, 160);
+    const originalTitle = stringField(record.originalTitle, 180);
+    if (!id && !originalTitle) throw new Error(`manifest 第 ${index + 1} 条缺少 id 或 originalTitle`);
+    return {
+      id,
+      originalTitle,
+      displayTitle: stringField(record.displayTitle, 180),
+      season: stringField(record.season, 60),
+      fileName
+    };
+  });
+}
+
+function matchAlbumForCoverImport(
+  item: CoverImportManifestItem,
+  byId: Map<string, number>,
+  byTitle: Map<string, number>
+): number | undefined {
+  if (item.id) {
+    const direct = byId.get(item.id);
+    if (direct !== undefined) return direct;
+  }
+  if (item.originalTitle) {
+    return byTitle.get(coverImportMatchKey(item.originalTitle));
+  }
+  return undefined;
+}
+
+function buildCoverEntriesIndex(zip: AdmZip) {
+  const entries = new Map<string, Buffer>();
+  for (const entry of zip.getEntries()) {
+    if (entry.isDirectory) continue;
+    const name = entry.entryName.replace(/\\/g, '/');
+    if (isUnsafeZipEntryName(name)) continue;
+    const baseName = path.basename(name);
+    // Only index the basename so manifest fileName can match regardless of
+    // whether the zip nests images under a folder.
+    if (!entries.has(baseName)) entries.set(baseName, entry.getData());
+  }
+  return entries;
+}
+
+function coverImportFileBaseName(fileName: string) {
+  const normalized = fileName.replace(/\\/g, '/');
+  if (isUnsafeZipEntryName(normalized)) return '';
+  return path.basename(normalized);
+}
+
+async function readCoverImportZipBuffer(req: express.Request) {
+  const contentType = String(req.headers['content-type'] || '');
+  if (!contentType.includes('multipart/form-data')) {
+    throw new Error('请求必须是 multipart/form-data');
+  }
+  const boundary = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i)?.[1] || contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i)?.[2];
+  if (!boundary) throw new Error('请求缺少 multipart boundary');
+
+  const body = await readRequestBody(req, maxCoverImportZipBytes, 'zip 文件不能超过 256MB');
+  const boundaryBuffer = Buffer.from(`--${boundary}`);
+  let position = body.indexOf(boundaryBuffer);
+  while (position >= 0) {
+    const nextPosition = body.indexOf(boundaryBuffer, position + boundaryBuffer.length);
+    if (nextPosition < 0) break;
+    let part = body.subarray(position + boundaryBuffer.length, nextPosition);
+    if (part.subarray(0, 2).toString() === '\r\n') part = part.subarray(2);
+    if (part.subarray(-2).toString() === '\r\n') part = part.subarray(0, -2);
+    const headerEnd = part.indexOf(Buffer.from('\r\n\r\n'));
+    if (headerEnd >= 0) {
+      const headers = part.subarray(0, headerEnd).toString('utf8');
+      if (/content-disposition:[^\n]*name="file"/i.test(headers)) {
+        const buffer = part.subarray(headerEnd + 4);
+        if (!buffer.length) throw new Error('上传的 file 字段为空');
+        return buffer;
+      }
+    }
+    position = nextPosition;
+  }
+  throw new Error('没有收到 file 文件字段');
 }
 
 function applyMetadataTemplateItem(album: Album, item: MetadataTemplateItem) {
@@ -1682,13 +1822,13 @@ const coverUploadMimeToExtension: Record<string, string> = {
 };
 const maxCoverUploadBytes = 10 * 1024 * 1024;
 
-async function readRequestBody(req: express.Request, maxBytes: number) {
+async function readRequestBody(req: express.Request, maxBytes: number, tooLargeMessage = '封面文件不能超过 10MB') {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.length;
-    if (size > maxBytes) throw new Error('封面文件不能超过 10MB');
+    if (size > maxBytes) throw new Error(tooLargeMessage);
     chunks.push(buffer);
   }
   return Buffer.concat(chunks);
@@ -2453,6 +2593,171 @@ app.patch('/api/albums/:id/cover', (req, res) => {
   state.albums[albumIndex] = { ...state.albums[albumIndex], cover };
   writeState(state);
   res.json({ album: state.albums[albumIndex] });
+});
+
+app.post('/api/covers/import', async (req, res) => {
+  let zipBuffer: Buffer;
+  try {
+    zipBuffer = await readCoverImportZipBuffer(req);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '读取上传 zip 失败';
+    console.error(`[cover-import] read request failed: ${message}`);
+    return res.status(400).json({ error: message });
+  }
+
+  const details: CoverImportAlbumResult[] = [];
+  const errors: CoverImportError[] = [];
+  const notMatched: string[] = [];
+  let imported = 0;
+  let skipped = 0;
+
+  let zip: AdmZip;
+  try {
+    zip = new AdmZip(zipBuffer);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'zip 解析失败';
+    console.error(`[cover-import] parse zip failed: ${message}`);
+    return res.status(400).json({ error: `无法解析 zip 文件：${message}` });
+  }
+
+  // Find and parse manifest.json (basename match, ignore unsafe entries).
+  const entries = zip.getEntries();
+  const manifestEntry = entries.find((entry) => !entry.isDirectory && path.basename(entry.entryName) === 'manifest.json' && !isUnsafeZipEntryName(entry.entryName.replace(/\\/g, '/')));
+  if (!manifestEntry) {
+    return res.status(400).json({ error: 'zip 内未找到 manifest.json' });
+  }
+
+  let items: CoverImportManifestItem[];
+  try {
+    items = parseCoverImportManifest(manifestEntry.getData().toString('utf8'));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'manifest.json 解析失败';
+    return res.status(400).json({ error: message });
+  }
+
+  const imageEntries = buildCoverEntriesIndex(zip);
+
+  // Read state preserving playbackProgress ownership exactly like metadata import.
+  const state = readStateForMetadataImport();
+  const nextState: AppState = JSON.parse(JSON.stringify(state));
+  const byId = new Map(nextState.albums.map((album, index) => [album.id, index]));
+  const byTitle = new Map(
+    nextState.albums.map((album, index) => [coverImportMatchKey(album.title), index])
+  );
+
+  let backupFile: string | undefined;
+  try {
+    backupFile = backupStateBeforeCoverImport();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '备份 state.json 失败';
+    console.error(`[cover-import] backup failed: ${message}`);
+    return res.status(500).json({ error: message });
+  }
+
+  for (const item of items) {
+    const label = item.originalTitle || item.id || item.fileName;
+    try {
+      const index = matchAlbumForCoverImport(item, byId, byTitle);
+      if (index === undefined) {
+        notMatched.push(label);
+        details.push({ originalTitle: label, fileName: item.fileName, status: 'notMatched', message: '未找到匹配专辑' });
+        continue;
+      }
+
+      const album = nextState.albums[index];
+      const requestedFileName = coverImportFileBaseName(item.fileName);
+      if (!requestedFileName) {
+        const message = `不安全的图片路径：${item.fileName}`;
+        errors.push({ originalTitle: label, fileName: item.fileName, message });
+        details.push({ originalTitle: label, fileName: item.fileName, albumId: album.id, albumTitle: album.title, status: 'error', message });
+        continue;
+      }
+
+      const imageBuffer = imageEntries.get(requestedFileName);
+      if (!imageBuffer) {
+        const message = `zip 内未找到对应图片：${item.fileName}`;
+        errors.push({ originalTitle: label, fileName: item.fileName, message });
+        details.push({ originalTitle: label, fileName: item.fileName, albumId: album.id, albumTitle: album.title, status: 'error', message });
+        continue;
+      }
+
+      if (imageBuffer.length > maxCoverImportImageBytes) {
+        const message = `图片超过 10MB：${item.fileName}（${Math.round(imageBuffer.length / 1024 / 1024)}MB）`;
+        errors.push({ originalTitle: label, fileName: item.fileName, message });
+        details.push({ originalTitle: label, fileName: item.fileName, albumId: album.id, albumTitle: album.title, status: 'error', message });
+        continue;
+      }
+
+      const ext = path.extname(requestedFileName).toLowerCase();
+      if (!coverImportSupportedExtensions.has(ext)) {
+        const message = `不支持的图片格式：${ext || '未知'}（仅支持 png/jpg/jpeg/webp）`;
+        errors.push({ originalTitle: label, fileName: item.fileName, message });
+        details.push({ originalTitle: label, fileName: item.fileName, albumId: album.id, albumTitle: album.title, status: 'error', message });
+        continue;
+      }
+
+      const safeExt = ext === '.jpeg' ? '.jpg' : ext;
+      const fileName = `${safeFileName(album.id)}${safeExt}`;
+      fs.mkdirSync(coversDir, { recursive: true });
+      const savePath = path.join(coversDir, fileName);
+      fs.writeFileSync(savePath, imageBuffer);
+
+      const coverUpdatedAt = Date.now();
+      const cover = `/covers/${fileName}?v=${coverUpdatedAt}`;
+      // Only cover + coverUpdatedAt are ever written here. Everything else on
+      // the album (episodes, audio path, playbackProgress, metadata, mainCV,
+      // tags, description, id) is copied through as-is.
+      nextState.albums[index] = {
+        ...nextState.albums[index],
+        cover,
+        coverUpdatedAt
+      };
+
+      imported += 1;
+      details.push({
+        originalTitle: label,
+        fileName: item.fileName,
+        albumId: album.id,
+        albumTitle: album.title,
+        status: 'imported',
+        cover,
+        coverUpdatedAt
+      });
+      console.log(`[cover-import] saved albumId=${album.id} fileName=${item.fileName} size=${imageBuffer.length} savePath=${savePath}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '导入失败';
+      errors.push({ originalTitle: label, fileName: item.fileName, message });
+      details.push({ originalTitle: label, fileName: item.fileName, status: 'error', message });
+      console.error(`[cover-import] item failed originalTitle=${label} fileName=${item.fileName} error=${message}`);
+    }
+  }
+
+  try {
+    if (imported > 0) writeMetadataImportState(nextState);
+    const result: CoverImportResult = {
+      total: items.length,
+      imported,
+      skipped,
+      notMatched,
+      errors,
+      backupFile,
+      details
+    };
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '备份或写入失败';
+    console.error(`[cover-import] persist failed: ${message}`);
+    res.status(500).json({
+      error: message,
+      total: items.length,
+      imported: 0,
+      skipped,
+      notMatched,
+      errors,
+      backupFile,
+      details
+    });
+  }
 });
 
 app.patch('/api/albums/:id/metadata', (req, res) => {

@@ -96,6 +96,41 @@ export type MetadataImportResult = {
   backupFile?: string;
 };
 
+export type CoverImportManifestItem = {
+  id?: string;
+  originalTitle?: string;
+  displayTitle?: string;
+  season?: string;
+  fileName: string;
+};
+
+export type CoverImportAlbumResult = {
+  originalTitle: string;
+  fileName: string;
+  albumId?: string;
+  albumTitle?: string;
+  status: 'imported' | 'skipped' | 'notMatched' | 'error';
+  cover?: string;
+  coverUpdatedAt?: number;
+  message?: string;
+};
+
+export type CoverImportError = {
+  originalTitle: string;
+  fileName: string;
+  message: string;
+};
+
+export type CoverImportResult = {
+  total: number;
+  imported: number;
+  skipped: number;
+  notMatched: string[];
+  errors: CoverImportError[];
+  backupFile?: string;
+  details: CoverImportAlbumResult[];
+};
+
 export type PlaybackProgress = {
   albumId: string;
   episodeId: string;
