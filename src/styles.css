@@ -230,6 +230,13 @@ button:focus-visible {
   overflow: hidden;
 }
 
+.hero-season {
+  margin: 7px 0 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 800;
+}
+
 .hero-cover,
 .album-cover {
   color: rgba(255, 255, 255, 0.9);
@@ -327,6 +334,7 @@ button:focus-visible {
   color: white;
   font-weight: 800;
   box-shadow: 0 12px 28px rgba(255, 90, 165, 0.28);
+  margin-bottom: 10px;
 }
 
 .sketch-icon {
@@ -3213,9 +3221,20 @@ button:focus-visible {
     font-size: 25px;
   }
 
+  .hero-season {
+    margin-top: 5px;
+    font-size: 13px;
+  }
+
   .primary-action {
     min-height: 40px;
     padding: 0 14px;
+    margin-top: 2px;
+    margin-bottom: 13px;
+  }
+
+  .hero-progress {
+    margin-top: 0;
   }
 
   .album-grid {
@@ -3251,8 +3270,7 @@ button:focus-visible {
   .drama-row-copy {
     position: relative;
     min-height: 0;
-    height: 74px;
-    padding-bottom: 15px;
+    height: 78px;
     overflow: hidden;
   }
 
@@ -3291,14 +3309,12 @@ button:focus-visible {
   }
 
   .drama-row-copy em {
-    position: absolute;
-    right: 0;
-    bottom: 0;
+    margin-top: 3px;
     min-height: 14px;
-    max-width: 84px;
+    max-width: none;
     font-size: 11px;
     line-height: 1.2;
-    text-align: right;
+    text-align: left;
   }
 
   .drama-row-status span {
@@ -3307,17 +3323,16 @@ button:focus-visible {
 
   .drama-row-status time {
     display: block;
+    flex: 0 0 auto;
     overflow: hidden;
     text-overflow: ellipsis;
   }
 
   .drama-row-progress {
-    position: absolute;
-    left: 0;
-    right: 88px;
-    bottom: 4px;
+    position: static;
     height: 3px;
-    margin-top: 0;
+    margin-top: 4px;
+    width: calc(100% - 4px);
   }
 
   .drama-play,

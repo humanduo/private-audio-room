@@ -1052,6 +1052,7 @@ function HomeView({
   const heroTime = isHeroCurrent ? audioTime || heroSaved.currentTime : heroSaved.currentTime;
   const heroDuration = isHeroCurrent ? audioDuration || heroSaved.duration : heroSaved.duration;
   const heroProgress = isHeroCurrent ? audioProgress : heroSaved.progress || hero?.progress || 0;
+  const heroDisplayTitle = splitAlbumListTitle(hero?.title || '');
   useEffect(() => {
     if (hero) {
       console.log('[player] home hero progress source', {
@@ -1063,8 +1064,8 @@ function HomeView({
       });
     }
   }, [hero?.id, currentAlbum?.id, isHeroCurrent, heroTime, heroDuration]);
-  const heroEpisodeLabel = hero && heroEpisode?.title
-    ? `正在听 第 ${String(episodeNumber(hero, heroEpisode)).padStart(2, '0')} 集 · ${heroEpisode.title}`
+  const heroEpisodeLabel = hero && heroEpisode
+    ? `正在听 第 ${String(episodeNumber(hero, heroEpisode)).padStart(2, '0')} 集`
     : hero?.subtitle || '连接 NAS 后扫描本地音频，就会出现在这里。';
 
   if (isLoading) {
@@ -1083,7 +1084,8 @@ function HomeView({
         <div className="hero-bg" aria-hidden="true" />
         <div>
           <p className="eyebrow">继续听</p>
-          <h1>{hero?.title || `还没有${kindLabel(activeKind)}`}</h1>
+          <h1>{hero ? heroDisplayTitle.title : `还没有${kindLabel(activeKind)}`}</h1>
+          {heroDisplayTitle.season ? <p className="hero-season">{heroDisplayTitle.season}</p> : null}
           <p>{heroEpisodeLabel}</p>
           {hero ? (
             <button
