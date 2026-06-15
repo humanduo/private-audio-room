@@ -205,11 +205,11 @@ function episodeNumber(album: Album, episode?: Episode | null) {
 }
 
 function savedEpisodeTime(album: Album | null | undefined, episode: Episode | null | undefined) {
-  return Math.max(0, episode?.currentTime || (album?.currentEpisodeId === episode?.id ? album?.currentTime || 0 : 0));
+  return savedPlaybackSnapshot(album, episode).currentTime;
 }
 
 function savedEpisodeDuration(album: Album | null | undefined, episode: Episode | null | undefined) {
-  return Math.max(0, episode?.durationSeconds || (album?.currentEpisodeId === episode?.id ? album?.durationSeconds || 0 : 0));
+  return savedPlaybackSnapshot(album, episode).duration;
 }
 
 function playbackProgressKey(album: Album | null | undefined, episode: Episode | null | undefined) {
@@ -229,13 +229,55 @@ function readLocalPlaybackProgress(album: Album | null | undefined, episode: Epi
   }
 }
 
-function saveLocalPlaybackProgress(album: Album, episode: Episode, currentTime: number, duration: number) {
+function serverPlaybackProgress(album: Album | null | undefined, episode: Episode | null | undefined): LocalPlaybackProgress | null {
+  if (!album || !episode) return null;
+  const currentTime = Math.max(0, episode.currentTime || (album.currentEpisodeId === episode.id ? album.currentTime || 0 : 0));
+  const duration = Math.max(0, episode.durationSeconds || (album.currentEpisodeId === episode.id ? album.durationSeconds || 0 : 0));
+  if (!currentTime && !duration && !episode.progress) return null;
+  return {
+    albumId: album.id,
+    episodeId: episode.id,
+    relativePath: episode.relativePath || '',
+    currentTime,
+    duration,
+    progress: duration > 0 ? Math.max(0, Math.min(100, Math.round((currentTime / duration) * 100))) : episode.progress || 0,
+    updatedAt: episode.lastPlayedAt || album.lastPlayedAt || ''
+  };
+}
+
+function isZeroOverwrite(existing: LocalPlaybackProgress | null, currentTime: number, ended = false) {
+  return Boolean(existing && existing.currentTime > 10 && currentTime < 2 && !ended);
+}
+
+function newerProgress(first: LocalPlaybackProgress | null, second: LocalPlaybackProgress | null) {
+  if (!first) return second;
+  if (!second) return first;
+  if (isZeroOverwrite(first, second.currentTime)) return first;
+  if (isZeroOverwrite(second, first.currentTime)) return second;
+  return new Date(second.updatedAt || 0).getTime() > new Date(first.updatedAt || 0).getTime() ? second : first;
+}
+
+function savedPlaybackSnapshot(album: Album | null | undefined, episode: Episode | null | undefined) {
+  const progress = newerProgress(serverPlaybackProgress(album, episode), readLocalPlaybackProgress(album, episode));
+  return {
+    currentTime: Math.max(0, progress?.currentTime || 0),
+    duration: Math.max(0, progress?.duration || 0),
+    progress: Math.max(0, progress?.progress || episode?.progress || 0),
+    updatedAt: progress?.updatedAt || ''
+  };
+}
+
+function saveLocalPlaybackProgress(album: Album, episode: Episode, currentTime: number, duration: number, ended = false) {
   const key = playbackProgressKey(album, episode);
   if (!key) return;
   const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : savedEpisodeDuration(album, episode);
   const safeCurrentTime = Number.isFinite(currentTime) && currentTime > 0 ? currentTime : 0;
   try {
     const parsed = JSON.parse(localStorage.getItem(playbackProgressStorageKey) || '{}') as Record<string, LocalPlaybackProgress>;
+    if (isZeroOverwrite(parsed[key] || null, safeCurrentTime, ended)) {
+      console.log('[player] skip local zero overwrite', { albumId: album.id, episodeId: episode.id, relativePath: episode.relativePath, currentTime: safeCurrentTime });
+      return;
+    }
     parsed[key] = {
       albumId: album.id,
       episodeId: episode.id,
@@ -252,9 +294,7 @@ function saveLocalPlaybackProgress(album: Album, episode: Episode, currentTime: 
 }
 
 function savedOrLocalEpisodeTime(album: Album | null | undefined, episode: Episode | null | undefined) {
-  const serverTime = savedEpisodeTime(album, episode);
-  const localTime = readLocalPlaybackProgress(album, episode)?.currentTime || 0;
-  return Math.max(serverTime, localTime);
+  return savedPlaybackSnapshot(album, episode).currentTime;
 }
 
 function cvInitial(name: string) {
@@ -356,6 +396,7 @@ export function App() {
   const [audioDuration, setAudioDuration] = useState(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const lastProgressSaveRef = useRef(0);
+  const restoringProgressRef = useRef(false);
 
   async function load(kind = activeKind, q = query, category = activeCategory, mode = searchMode) {
     setIsLoading(true);
@@ -404,12 +445,32 @@ export function App() {
   const displayedTime = audioTime || savedOrLocalEpisodeTime(displayedPlayerAlbum, displayedPlayerEpisode);
   const audioProgress =
     displayedDuration > 0 ? Math.min(100, Math.round((displayedTime / displayedDuration) * 100)) : displayedPlayerEpisode?.progress || 0;
+  const selectedAlbumIsPlaying = Boolean(selectedAlbum && playerAlbum?.id === selectedAlbum.id);
+  const selectedAlbumEpisode = selectedAlbumIsPlaying ? playerEpisode : activeEpisodeForAlbum(selectedAlbum);
+  const selectedAlbumSnapshot = savedPlaybackSnapshot(selectedAlbum, selectedAlbumEpisode);
+  const selectedAlbumTime = selectedAlbumIsPlaying ? audioTime : selectedAlbumSnapshot.currentTime;
+  const selectedAlbumDuration = selectedAlbumIsPlaying ? audioDuration || selectedAlbumSnapshot.duration : selectedAlbumSnapshot.duration;
+  const selectedAlbumProgress =
+    selectedAlbumDuration > 0
+      ? Math.min(100, Math.round((selectedAlbumTime / selectedAlbumDuration) * 100))
+      : selectedAlbumSnapshot.progress;
 
   function nextPlayableEpisode(album: Album) {
     return activeEpisodeForAlbum(album);
   }
 
-  async function playAlbum(album: Album, episode = nextPlayableEpisode(album)) {
+  async function playAlbum(album: Album, episodeArg?: Episode) {
+    console.log('[player] card/play request', {
+      targetAlbumId: album.id,
+      currentAlbumId: playerAlbum?.id || '',
+      switchAlbum: playerAlbum?.id !== album.id,
+      explicitEpisodeId: episodeArg?.id || ''
+    });
+    if (!episodeArg && playerAlbum?.id === album.id && playerEpisode?.filePath) {
+      togglePlay();
+      return;
+    }
+    const episode = episodeArg || nextPlayableEpisode(album);
     if (!episode?.filePath) {
       setNotice('这个条目还没有真实音频文件，请先在 NAS 文件页扫描音频');
       setPlayerAlbum(album);
@@ -427,23 +488,40 @@ export function App() {
     const src = `/media/${encodeURIComponent(album.id)}/${encodeURIComponent(episode.id)}`;
     const absoluteSrc = new URL(src, window.location.href).href;
     if (audio.src !== absoluteSrc) {
+      const snapshot = savedPlaybackSnapshot(album, episode);
+      const savedTime = snapshot.currentTime;
+      console.log('[player] switching audio src and restoring progress', {
+        albumId: album.id,
+        episodeId: episode.id,
+        relativePath: episode.relativePath || '',
+        savedTime
+      });
+      restoringProgressRef.current = true;
       audio.src = src;
       audio.load();
       setAudioTime(0);
       setAudioDuration(0);
-      audio.onloadedmetadata = () => {
+      audio.addEventListener('loadedmetadata', () => {
         const duration = audio.duration || 0;
-        const localProgress = readLocalPlaybackProgress(album, episode);
         const resumeTime =
-          savedEpisodeTime(album, episode) ||
-          localProgress?.currentTime ||
-          (duration > 0 && episode.progress && episode.progress > 0 && episode.progress < 100 ? (duration * episode.progress) / 100 : 0);
+          duration > 0 && savedTime > 0 && duration - savedTime < 10
+            ? 0
+            : savedTime || (duration > 0 && episode.progress && episode.progress > 0 && episode.progress < 100 ? (duration * episode.progress) / 100 : 0);
         setAudioDuration(duration);
         if (duration > 0 && resumeTime > 0 && resumeTime < duration - 1) {
           audio.currentTime = Math.max(0, Math.min(duration - 1, resumeTime));
           setAudioTime(audio.currentTime);
         }
-      };
+        restoringProgressRef.current = false;
+        console.log('[player] restored after loadedmetadata', {
+          albumId: album.id,
+          episodeId: episode.id,
+          relativePath: episode.relativePath || '',
+          savedTime,
+          restoredTime: audio.currentTime || 0,
+          duration
+        });
+      }, { once: true });
     }
     try {
       await audio.play();
@@ -477,18 +555,27 @@ export function App() {
     setSelectedAlbum((current) => (current?.id === nextAlbum.id ? nextAlbum : current));
   }
 
-  async function savePlaybackProgress(force = false) {
+  async function savePlaybackProgress(force = false, ended = false) {
     const audio = audioRef.current;
-    if (!displayedPlayerAlbum || !displayedPlayerEpisode || !audio) return;
+    if (!playerAlbum || !playerEpisode || !audio) return;
+    if (restoringProgressRef.current) {
+      console.log('[player] skip save while restoring progress', { albumId: playerAlbum.id, episodeId: playerEpisode.id });
+      return;
+    }
     const now = Date.now();
     if (!force && now - lastProgressSaveRef.current < 3000) return;
     lastProgressSaveRef.current = now;
-    const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : savedEpisodeDuration(displayedPlayerAlbum, displayedPlayerEpisode);
-    const currentTime = Number.isFinite(audio.currentTime) ? audio.currentTime : savedEpisodeTime(displayedPlayerAlbum, displayedPlayerEpisode);
-    if (currentTime <= 0 && duration <= 0 && !force) return;
-    saveLocalPlaybackProgress(displayedPlayerAlbum, displayedPlayerEpisode, currentTime || 0, duration || 0);
+    const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : savedEpisodeDuration(playerAlbum, playerEpisode);
+    const currentTime = Number.isFinite(audio.currentTime) ? audio.currentTime : savedEpisodeTime(playerAlbum, playerEpisode);
+    if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(currentTime)) return;
+    if (currentTime < 3 && !ended) {
+      console.log('[player] skip save under 3s', { albumId: playerAlbum.id, episodeId: playerEpisode.id, relativePath: playerEpisode.relativePath || '', currentTime, duration });
+      return;
+    }
+    saveLocalPlaybackProgress(playerAlbum, playerEpisode, currentTime || 0, duration || 0, ended);
     try {
-      const nextAlbum = await updateEpisodeProgress(displayedPlayerAlbum.id, displayedPlayerEpisode.id, currentTime || 0, duration || 0);
+      console.log('[player] save progress', { albumId: playerAlbum.id, episodeId: playerEpisode.id, relativePath: playerEpisode.relativePath || '', currentTime, duration, ended });
+      const nextAlbum = await updateEpisodeProgress(playerAlbum.id, playerEpisode, currentTime || 0, duration || 0, ended);
       patchAlbumInState(nextAlbum);
     } catch {
       // Playback should not be interrupted if progress persistence fails.
@@ -746,8 +833,8 @@ export function App() {
               onRefreshCvAvatars={handleRefreshCvAvatars}
               onPlay={playAlbum}
               selectedAlbum={selectedAlbum}
-              currentAlbum={displayedPlayerAlbum}
-              currentEpisode={displayedPlayerEpisode}
+              currentAlbum={playerAlbum}
+              currentEpisode={playerEpisode}
               audioProgress={audioProgress}
               audioTime={audioTime}
               audioDuration={audioDuration}
@@ -805,12 +892,16 @@ export function App() {
             onRemoveFavorite={handleRemoveFavorite}
             onPlay={playAlbum}
             onSearchCv={handleSearchCv}
-            currentEpisodeId={displayedPlayerEpisode?.id}
-            isPlaying={isPlaying}
-            audioTime={audioTime}
-            audioDuration={audioDuration}
-            audioProgress={audioProgress}
-            onTogglePlay={togglePlay}
+            currentEpisodeId={selectedAlbumEpisode?.id}
+            isPlaying={selectedAlbumIsPlaying && isPlaying}
+            audioTime={selectedAlbumTime}
+            audioDuration={selectedAlbumDuration}
+            audioProgress={selectedAlbumProgress}
+            onTogglePlay={() => {
+              if (!selectedAlbum) return;
+              if (selectedAlbumIsPlaying) togglePlay();
+              else void playAlbum(selectedAlbum, selectedAlbumEpisode || undefined);
+            }}
             onSeek={seekAudio}
           />
         ) : null}
@@ -846,7 +937,7 @@ export function App() {
           onPlay={() => setIsPlaying(true)}
           onEnded={() => {
             setIsPlaying(false);
-            void savePlaybackProgress(true);
+            void savePlaybackProgress(true, true);
           }}
           onLoadedMetadata={(event) => setAudioDuration(event.currentTarget.duration || 0)}
           onDurationChange={(event) => setAudioDuration(event.currentTarget.duration || 0)}
@@ -939,11 +1030,23 @@ function HomeView({
   const [cvQuery, setCvQuery] = useState('');
   const filteredAlbums = useMemo(() => albums.filter((album) => matchesMetadataFilters(album, filters)), [albums, filters]);
   const hero = currentAlbum || albums.find((album) => album.status === 'listening') || albums[0];
-  const heroProgress = currentAlbum?.id === hero?.id ? audioProgress : hero?.progress || 0;
   const isHeroCurrent = Boolean(hero && currentAlbum?.id === hero.id);
   const heroEpisode = isHeroCurrent && currentEpisode ? currentEpisode : activeEpisodeForAlbum(hero);
-  const heroTime = isHeroCurrent ? audioTime || savedEpisodeTime(hero, heroEpisode) : savedEpisodeTime(hero, heroEpisode);
-  const heroDuration = isHeroCurrent ? audioDuration || savedEpisodeDuration(hero, heroEpisode) : savedEpisodeDuration(hero, heroEpisode);
+  const heroSaved = savedPlaybackSnapshot(hero, heroEpisode);
+  const heroTime = isHeroCurrent ? audioTime || heroSaved.currentTime : heroSaved.currentTime;
+  const heroDuration = isHeroCurrent ? audioDuration || heroSaved.duration : heroSaved.duration;
+  const heroProgress = isHeroCurrent ? audioProgress : heroSaved.progress || hero?.progress || 0;
+  useEffect(() => {
+    if (hero) {
+      console.log('[player] home hero progress source', {
+        viewedAlbumId: hero.id,
+        currentPlayingAlbumId: currentAlbum?.id || '',
+        source: isHeroCurrent ? 'live progress' : 'saved progress',
+        currentTime: heroTime,
+        duration: heroDuration
+      });
+    }
+  }, [hero?.id, currentAlbum?.id, isHeroCurrent, heroTime, heroDuration]);
   const heroEpisodeLabel = hero && heroEpisode?.title
     ? `正在听 第 ${String(episodeNumber(hero, heroEpisode)).padStart(2, '0')} 集 · ${heroEpisode.title}`
     : hero?.subtitle || '连接 NAS 后扫描本地音频，就会出现在这里。';
@@ -1148,8 +1251,10 @@ function DramaListRow({
 }) {
   const currentEpisode = activeEpisodeForAlbum(album);
   const lastIndex = episodeNumber(album, currentEpisode);
-  const currentTime = savedEpisodeTime(album, currentEpisode);
-  const duration = savedEpisodeDuration(album, currentEpisode);
+  const saved = savedPlaybackSnapshot(album, currentEpisode);
+  const currentTime = saved.currentTime;
+  const duration = saved.duration;
+  const progress = saved.progress || album.progress || 0;
 
   return (
     <article className="drama-row">
@@ -1167,11 +1272,11 @@ function DramaListRow({
             </span>
           ) : null}
           <em>
-            已播放 <b>{album.progress}%</b> · 上次听到 <b>第 {String(lastIndex).padStart(2, '0')} 集</b>
+            已播放 <b>{progress}%</b> · 上次听到 <b>第 {String(lastIndex).padStart(2, '0')} 集</b>
             {duration ? ` · ${formatClock(currentTime)} / ${formatClock(duration)}` : ''}
           </em>
           <span className="drama-row-progress">
-            <i style={{ width: `${album.progress}%` }} />
+            <i style={{ width: `${progress}%` }} />
           </span>
         </span>
       </button>
@@ -2240,6 +2345,17 @@ function AlbumDrawer({
   const isFavorited = favoriteFolders.some((folder) => folder.albumIds.includes(album.id));
 
   useEffect(() => {
+    console.log('[player] drawer progress source', {
+      viewedAlbumId: album.id,
+      activeEpisodeId: activeEpisode?.id || '',
+      source: isPlaying ? 'live progress' : 'saved progress',
+      currentTime: audioTime,
+      duration: audioDuration,
+      progress: audioProgress
+    });
+  }, [album.id, activeEpisode?.id, isPlaying, audioTime, audioDuration, audioProgress]);
+
+  useEffect(() => {
     setMetadataDraft({
       author: album.author || '',
       cast: joinList(album.cast),
@@ -2412,7 +2528,7 @@ function AlbumDrawer({
                 max={audioDuration || 0}
                 step="1"
                 value={audioDuration ? audioTime : 0}
-                disabled={!audioDuration}
+                disabled={!audioDuration || !isPlaying}
                 onChange={(event) => onSeek(Number(event.currentTarget.value))}
               />
             </label>

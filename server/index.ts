@@ -1077,8 +1077,12 @@ function progressKey(relativePath: string, episodeId = '') {
   return relativePath || episodeId;
 }
 
-function playbackProgressFromAlbum(album: Album, episode: Episode, currentTime: number, duration: number): PlaybackProgress {
-  const safeDuration = Math.max(0, duration || episode.durationSeconds || 0);
+function shouldRejectZeroPlaybackOverwrite(existing: PlaybackProgress | undefined, currentTime: number, ended = false) {
+  return Boolean(existing && existing.currentTime > 10 && currentTime < 2 && !ended);
+}
+
+function playbackProgressFromAlbum(album: Album, episode: Episode, currentTime: number, duration: number, previous?: PlaybackProgress): PlaybackProgress {
+  const safeDuration = Math.max(0, duration || previous?.duration || episode.durationSeconds || 0);
   const safeCurrentTime = Math.max(0, currentTime);
   return {
     albumId: album.id,
@@ -1102,6 +1106,13 @@ function applyPlaybackProgressToState(state: AppState, progress: PlaybackProgres
   );
   if (episodeIndex < 0) return null;
 
+  const key = progressKey(progress.relativePath, progress.episodeId);
+  const existing = state.playbackProgress[key];
+  if (existing && progress.updatedAt && existing.updatedAt && new Date(progress.updatedAt).getTime() < new Date(existing.updatedAt).getTime()) {
+    console.log(`[player] reject stale progress relativePath=${progress.relativePath} currentTime=${Math.round(progress.currentTime)} oldCurrentTime=${Math.round(existing.currentTime)}`);
+    return album;
+  }
+
   const now = progress.updatedAt || nowIso();
   const nextEpisodes = album.episodes.map((episode, index) =>
     index === episodeIndex
@@ -1109,7 +1120,7 @@ function applyPlaybackProgressToState(state: AppState, progress: PlaybackProgres
           ...episode,
           progress: progress.progress,
           currentTime: progress.currentTime,
-          durationSeconds: progress.duration || episode.durationSeconds || 0,
+          durationSeconds: progress.duration || episode.durationSeconds || existing?.duration || 0,
           lastPlayedAt: now
         }
       : episode
@@ -1124,12 +1135,12 @@ function applyPlaybackProgressToState(state: AppState, progress: PlaybackProgres
     episodes: nextEpisodes,
     currentEpisodeId: nextEpisodes[episodeIndex].id,
     currentTime: progress.currentTime,
-    durationSeconds: progress.duration || state.albums[albumIndex].durationSeconds || 0,
+    durationSeconds: progress.duration || state.albums[albumIndex].durationSeconds || existing?.duration || 0,
     lastPlayedAt: now,
     progress: progress.progress,
     updatedAt: '刚刚播放'
   };
-  state.playbackProgress[progressKey(progress.relativePath, progress.episodeId)] = progress;
+  state.playbackProgress[key] = progress;
   return state.albums[albumIndex];
 }
 
@@ -2080,8 +2091,16 @@ app.patch('/api/albums/:albumId/episodes/:episodeId/progress', (req, res) => {
   const now = nowIso();
   const currentTime = Math.max(0, finiteNumber(req.body?.currentTime, 0));
   const duration = Math.max(0, finiteNumber(req.body?.duration, 0));
+  const ended = Boolean(req.body?.ended);
   const previousEpisode = album.episodes[episodeIndex];
-  const playbackProgress = playbackProgressFromAlbum(album, { ...previousEpisode, lastPlayedAt: now }, currentTime, duration);
+  const relativePath = previousEpisode.relativePath || previousEpisode.filePath || previousEpisode.id;
+  const existing = state.playbackProgress[progressKey(relativePath, previousEpisode.id)];
+  if (shouldRejectZeroPlaybackOverwrite(existing, currentTime, ended)) {
+    console.log(`[player] reject zero overwrite albumId=${album.id} relativePath=${relativePath} currentTime=${currentTime} oldCurrentTime=${existing?.currentTime || 0}`);
+    return res.json({ album: state.albums[albumIndex], progress: existing });
+  }
+  const playbackProgress = playbackProgressFromAlbum(album, { ...previousEpisode, lastPlayedAt: now }, currentTime, duration, existing);
+  playbackProgress.updatedAt = stringField(req.body?.updatedAt, 80) || now;
   const nextAlbum = applyPlaybackProgressToState(state, playbackProgress);
   if (!nextAlbum) return res.status(404).json({ error: 'Episode not found' });
   console.log(`[player] save progress relativePath=${playbackProgress.relativePath} currentTime=${Math.round(playbackProgress.currentTime)}`);
@@ -2117,10 +2136,18 @@ app.post('/api/playback-progress', (req, res) => {
 
   const currentTime = Math.max(0, finiteNumber(req.body.currentTime, 0));
   const duration = Math.max(0, finiteNumber(req.body.duration, 0));
-  const progress = playbackProgressFromAlbum(album, episode, currentTime, duration);
+  const ended = Boolean(req.body.ended);
+  const key = progressKey(episode.relativePath || episode.filePath || episode.id, episode.id);
+  const existing = state.playbackProgress[key];
+  if (shouldRejectZeroPlaybackOverwrite(existing, currentTime, ended)) {
+    console.log(`[player] reject zero overwrite albumId=${album.id} relativePath=${episode.relativePath || ''} currentTime=${currentTime} oldCurrentTime=${existing?.currentTime || 0}`);
+    return res.json({ progress: existing, album: state.albums[state.albums.findIndex((item) => item.id === album.id)] || album });
+  }
+  const progress = playbackProgressFromAlbum(album, episode, currentTime, duration, existing);
+  progress.updatedAt = stringField(req.body.updatedAt, 80) || progress.updatedAt;
   const nextAlbum = applyPlaybackProgressToState(state, progress);
   if (!nextAlbum) return res.status(404).json({ error: 'Episode not found' });
-  console.log(`[player] save progress relativePath=${progress.relativePath} currentTime=${Math.round(progress.currentTime)}`);
+  console.log(`[player] save progress relativePath=${progress.relativePath} currentTime=${Math.round(progress.currentTime)} duration=${Math.round(progress.duration)}`);
   writeState(state);
   res.json({ progress, album: nextAlbum });
 });

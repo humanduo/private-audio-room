@@ -3,6 +3,7 @@ import type {
   AlbumRecommendation,
   AiPendingMetadata,
   Category,
+  Episode,
   FavoriteFolder,
   MediaKind,
   MetadataAnalyzeEstimate,
@@ -59,11 +60,19 @@ export async function fetchAlbumRecommendations(albumId: string): Promise<AlbumR
   return data.recommendations;
 }
 
-export async function updateEpisodeProgress(albumId: string, episodeId: string, currentTime: number, duration: number): Promise<Album> {
-  const response = await fetch(`/api/albums/${albumId}/episodes/${episodeId}/progress`, {
-    method: 'PATCH',
+export async function updateEpisodeProgress(albumId: string, episode: Episode, currentTime: number, duration: number, ended = false): Promise<Album> {
+  const response = await fetch('/api/playback-progress', {
+    method: 'POST',
     headers: jsonHeaders,
-    body: JSON.stringify({ currentTime, duration })
+    body: JSON.stringify({
+      albumId,
+      episodeId: episode.id,
+      relativePath: episode.relativePath || '',
+      currentTime,
+      duration,
+      ended,
+      updatedAt: new Date().toISOString()
+    })
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || '播放进度保存失败');
