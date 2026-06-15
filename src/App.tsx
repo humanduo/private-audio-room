@@ -24,6 +24,7 @@ import {
   createFavoriteFolder,
   estimateLibraryMetadata,
   createCategory,
+  exportMetadataTemplate,
   fetchAlbumRecommendations,
   fetchAiPendingMetadata,
   fetchAlbums,
@@ -32,6 +33,7 @@ import {
   fetchNas,
   fetchProfile,
   generateAlbumCover,
+  importMetadataTemplate,
   refreshCvAvatars,
   rejectAiPendingMetadata,
   removeAlbumFromFavoriteFolder,
@@ -56,6 +58,8 @@ import type {
   MetadataAnalyzeEstimate,
   MetadataAnalyzeJob,
   MetadataAnalyzeMode,
+  MetadataImportResult,
+  MetadataTemplateItem,
   NasConfig,
   SearchMode
 } from './types';
@@ -887,6 +891,7 @@ export function App() {
               onAddCategory={handleAddCategory}
               onAnalyzeLibrary={handleAnalyzeLibraryMetadata}
               onAlbumUpdated={patchAlbumInState}
+              onMetadataImported={() => load()}
               onOpen={setSelectedAlbum}
             />
           ) : null}
@@ -1838,6 +1843,7 @@ function MeView({
   onAddCategory,
   onAnalyzeLibrary,
   onAlbumUpdated,
+  onMetadataImported,
   onOpen
 }: {
   nas: NasConfig | null;
@@ -1852,6 +1858,7 @@ function MeView({
   onAddCategory: (name: string) => Promise<void>;
   onAnalyzeLibrary: (mode?: MetadataAnalyzeMode) => Promise<void>;
   onAlbumUpdated: (album: Album) => void;
+  onMetadataImported: () => Promise<void>;
   onOpen: (album: Album) => void;
 }) {
   const [categoryName, setCategoryName] = useState('');
@@ -1867,6 +1874,10 @@ function MeView({
   const [isLoadingAiPending, setIsLoadingAiPending] = useState(false);
   const [busyAiPendingId, setBusyAiPendingId] = useState('');
   const [aiPendingError, setAiPendingError] = useState('');
+  const [isExportingMetadata, setIsExportingMetadata] = useState(false);
+  const [isImportingMetadata, setIsImportingMetadata] = useState(false);
+  const [metadataTransferError, setMetadataTransferError] = useState('');
+  const [metadataImportResult, setMetadataImportResult] = useState<MetadataImportResult | null>(null);
   const isAnalyzingLibrary = metadataAnalyzeJob?.status === 'queued' || metadataAnalyzeJob?.status === 'running';
   const metadataAnalyzePercent = metadataAnalyzeJob?.total
     ? Math.round((metadataAnalyzeJob.processed / metadataAnalyzeJob.total) * 100)
@@ -1999,6 +2010,51 @@ function MeView({
     }
   }
 
+  async function handleExportMetadataTemplate() {
+    setIsExportingMetadata(true);
+    setMetadataTransferError('');
+    try {
+      const items = await exportMetadataTemplate();
+      const blob = new Blob([JSON.stringify(items, null, 2)], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `private-audio-room-metadata-template-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setMetadataTransferError(error instanceof Error ? error.message : '资料模板导出失败');
+    } finally {
+      setIsExportingMetadata(false);
+    }
+  }
+
+  async function handleImportMetadataFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    setMetadataTransferError('');
+    setMetadataImportResult(null);
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as MetadataTemplateItem[] | { items?: MetadataTemplateItem[] };
+      const items = Array.isArray(parsed) ? parsed : parsed.items;
+      if (!Array.isArray(items)) throw new Error('JSON 必须是数组，或包含 items 数组');
+      const confirmed = window.confirm('导入前会自动备份 state.json，并且只更新广播剧资料字段。继续导入吗？');
+      if (!confirmed) return;
+      setIsImportingMetadata(true);
+      const result = await importMetadataTemplate(items);
+      setMetadataImportResult(result);
+      await onMetadataImported();
+    } catch (error) {
+      setMetadataTransferError(error instanceof Error ? error.message : '资料导入失败');
+    } finally {
+      setIsImportingMetadata(false);
+    }
+  }
+
   const myTools: Array<{ icon: SketchIconName; label: string; note: string }> = [
     { icon: 'timer', label: '定时关闭', note: '睡前播放' },
     { icon: 'chase', label: '我的追剧', note: '继续听' },
@@ -2070,6 +2126,50 @@ function MeView({
           </button>
         </div>
         <p>{nas?.connected ? `已连接：${nas.root}` : '把广播剧目录挂载到容器后，在这里保存路径并扫描。'}</p>
+      </div>
+
+      <div className="settings-card metadata-transfer-card">
+        <div className="metadata-transfer-head">
+          <div>
+            <label>资料导入 / 导出</label>
+            <strong>用 JSON 管理广播剧资料</strong>
+          </div>
+          <Download size={18} />
+        </div>
+        <p>导出模板后可补充 tags、CV、简介、分类等资料；导入前会自动备份 state.json，只更新资料字段。</p>
+        <div className="button-row">
+          <button onClick={() => void handleExportMetadataTemplate()} disabled={isExportingMetadata}>
+            {isExportingMetadata ? '导出中' : '导出模板 JSON'}
+          </button>
+          <label className={isImportingMetadata ? 'metadata-import-button disabled' : 'metadata-import-button'}>
+            {isImportingMetadata ? '导入中' : '上传 metadata JSON'}
+            <input type="file" accept=".json,application/json" disabled={isImportingMetadata} onChange={handleImportMetadataFile} />
+          </label>
+        </div>
+        {metadataTransferError ? <p className="metadata-transfer-error">{metadataTransferError}</p> : null}
+        {metadataImportResult ? (
+          <div className="metadata-import-result">
+            <div>
+              <span>总数</span>
+              <strong>{metadataImportResult.total}</strong>
+            </div>
+            <div>
+              <span>更新</span>
+              <strong>{metadataImportResult.updated}</strong>
+            </div>
+            <div>
+              <span>跳过</span>
+              <strong>{metadataImportResult.skipped}</strong>
+            </div>
+            <div>
+              <span>未匹配</span>
+              <strong>{metadataImportResult.notMatched.length}</strong>
+            </div>
+            <small>{metadataImportResult.backupFile ? `已备份：${metadataImportResult.backupFile.split('/').pop()}` : '已尝试备份 state.json'}</small>
+            {metadataImportResult.notMatched.length ? <em>未匹配：{metadataImportResult.notMatched.slice(0, 4).join('、')}</em> : null}
+            {metadataImportResult.errors.length ? <em>错误：{metadataImportResult.errors.slice(0, 3).join('；')}</em> : null}
+          </div>
+        ) : null}
       </div>
 
       <section className="favorites-panel">

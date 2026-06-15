@@ -15,6 +15,10 @@ import type {
   Episode,
   FavoriteFolder,
   MediaKind,
+  MetadataImportAlbumResult,
+  MetadataImportResult,
+  MetadataMainCV,
+  MetadataTemplateItem,
   NasConfig,
   PlaybackProgress,
   UserProfile
@@ -193,9 +197,36 @@ function readState(): AppState {
   return normalizeState(JSON.parse(raw));
 }
 
+type MetadataImportState = AppState & { __hadPlaybackProgress?: boolean };
+
+function readStateForMetadataImport(): MetadataImportState {
+  if (!fs.existsSync(stateFile)) return readState();
+  const rawState = JSON.parse(fs.readFileSync(stateFile, 'utf-8')) as Partial<AppState>;
+  const normalized = normalizeState(rawState);
+  return {
+    __hadPlaybackProgress: Object.prototype.hasOwnProperty.call(rawState, 'playbackProgress'),
+    nas: rawState.nas || normalized.nas,
+    albums: rawState.albums?.length ? (rawState.albums as Album[]) : normalized.albums,
+    categories: rawState.categories?.length ? rawState.categories : normalized.categories,
+    favoriteFolders: rawState.favoriteFolders || normalized.favoriteFolders,
+    profile: rawState.profile || normalized.profile,
+    playbackProgress: rawState.playbackProgress || normalized.playbackProgress,
+    aiPendingMetadata: rawState.aiPendingMetadata || normalized.aiPendingMetadata
+  };
+}
+
 function writeState(state: AppState) {
   fs.mkdirSync(path.dirname(stateFile), { recursive: true });
   fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+}
+
+function writeMetadataImportState(state: MetadataImportState) {
+  const output = { ...state } as Partial<MetadataImportState>;
+  const hadPlaybackProgress = Boolean(output.__hadPlaybackProgress);
+  delete output.__hadPlaybackProgress;
+  if (!hadPlaybackProgress) delete output.playbackProgress;
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  fs.writeFileSync(stateFile, JSON.stringify(output, null, 2));
 }
 
 function nowIso() {
@@ -379,6 +410,141 @@ function stringField(value: unknown, maxLength = 600) {
 function arrayField(value: unknown, maxItems = 12) {
   if (Array.isArray(value)) return uniqueStrings(value).slice(0, maxItems);
   return uniqueStrings(String(value || '').split(/[，,、\n]/)).slice(0, maxItems);
+}
+
+function metadataCvField(value: unknown, maxItems = 12): MetadataMainCV[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (typeof item === 'string') return { role: '', actor: stringField(item, 80) };
+      if (!item || typeof item !== 'object') return { role: '', actor: '' };
+      const record = item as Record<string, unknown>;
+      return {
+        role: stringField(metadataValue(record, ['role', '角色', 'character']), 80),
+        actor: stringField(metadataValue(record, ['actor', 'cv', 'CV', '配音', '配音演员', 'name', '姓名']), 80)
+      };
+    })
+    .filter((item) => item.role || item.actor)
+    .slice(0, maxItems);
+}
+
+function splitMetadataDisplayTitle(rawTitle: string) {
+  const original = stringField(rawTitle, 160);
+  const match = original.match(/\s*(第一季|第二季|第三季|第四季|第五季|第六季|第七季|第八季|第九季|第十季|上季|下季|完结)\s*/);
+  if (!match) return { displayTitle: original, season: '' };
+  return {
+    displayTitle: original.replace(match[0], ' ').replace(/\s+/g, ' ').trim() || original,
+    season: match[1]
+  };
+}
+
+function categoryLabelForKind(kind: MediaKind) {
+  if (kind === 'book') return '有声书';
+  if (kind === 'course') return '网课';
+  return '广播剧';
+}
+
+function albumToMetadataTemplate(album: Album): MetadataTemplateItem {
+  const titleParts = splitMetadataDisplayTitle(album.title);
+  const mainCV =
+    album.mainCV?.length
+      ? album.mainCV
+      : uniqueStrings(album.cast || [])
+          .slice(0, 8)
+          .map((actor) => ({ role: '', actor }));
+  return {
+    id: album.id,
+    originalTitle: album.title,
+    displayTitle: album.displayTitle || titleParts.displayTitle,
+    season: album.season || titleParts.season,
+    category: album.category || categoryLabelForKind(album.kind),
+    status: album.finishStatus || '',
+    relationship: album.relationship || '',
+    cp: album.cp || album.audience || '',
+    era: album.era || '',
+    topics: cleanMetadataTags(album.topics || album.genres || []),
+    tags: cleanMetadataTags(album.tags || []),
+    mainCV,
+    description: album.description || album.summary || '',
+    note: album.note || ''
+  };
+}
+
+function normalizeMetadataMatchKey(value: string) {
+  return stringField(value, 180)
+    .toLowerCase()
+    .replace(/[《》「」『』【】（）()［\]\[\].。·\-_—\s]/g, '');
+}
+
+function metadataItemsFromBody(body: unknown): MetadataTemplateItem[] {
+  const rawItems = Array.isArray(body) ? body : (body as { items?: unknown[] })?.items;
+  if (!Array.isArray(rawItems)) throw new Error('metadata JSON 必须是数组，或包含 items 数组');
+  return rawItems.map((item, index) => {
+    if (!item || typeof item !== 'object') throw new Error(`第 ${index + 1} 条不是有效对象`);
+    const record = item as Record<string, unknown>;
+    const originalTitle = stringField(record.originalTitle, 180);
+    const id = stringField(record.id, 160);
+    if (!originalTitle && !id) throw new Error(`第 ${index + 1} 条缺少 originalTitle 或 id`);
+    return {
+      id,
+      originalTitle,
+      displayTitle: stringField(record.displayTitle, 180),
+      season: stringField(record.season, 60),
+      category: stringField(record.category, 60),
+      status: stringField(record.status, 60),
+      relationship: normalizeRelationship(stringField(record.relationship, 60)),
+      cp: stringField(record.cp, 60),
+      era: stringField(record.era, 60),
+      topics: cleanMetadataTags(arrayField(record.topics, 24)),
+      tags: cleanMetadataTags(arrayField(record.tags, 32)),
+      mainCV: metadataCvField(record.mainCV, 20),
+      description: stringField(record.description, 1600),
+      note: stringField(record.note, 800)
+    };
+  });
+}
+
+function backupStateBeforeMetadataImport(state: AppState) {
+  const backupsDir = path.resolve('data/backups');
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, '').replace('T', '-');
+  const backupFile = path.join(backupsDir, `state-before-metadata-import-${stamp}.json`);
+  fs.mkdirSync(backupsDir, { recursive: true });
+  if (fs.existsSync(stateFile)) {
+    fs.copyFileSync(stateFile, backupFile);
+  } else {
+    fs.writeFileSync(backupFile, JSON.stringify(state, null, 2));
+  }
+  return backupFile;
+}
+
+function applyMetadataTemplateItem(album: Album, item: MetadataTemplateItem) {
+  const existing = JSON.stringify(album);
+  const nextMainCV = item.mainCV.length ? item.mainCV : album.mainCV || [];
+  const mainActors = uniqueStrings(nextMainCV.map((cv) => cv.actor)).slice(0, 20);
+  const next: Album = {
+    ...album,
+    displayTitle: item.displayTitle || album.displayTitle,
+    season: item.season || album.season,
+    category: item.category || album.category,
+    finishStatus: item.status ? normalizeFinishStatus(item.status, album.title) : album.finishStatus,
+    relationship: item.relationship || album.relationship,
+    cp: item.cp || album.cp,
+    audience: item.cp || album.audience,
+    era: item.era || album.era,
+    topics: item.topics.length ? item.topics : album.topics,
+    tags: item.tags.length ? cleanMetadataTags(item.tags) : album.tags,
+    mainCV: nextMainCV,
+    cast: mainActors.length ? mainActors : album.cast,
+    description: item.description || album.description,
+    summary: item.description || album.summary,
+    note: item.note || album.note,
+    metadataSource: 'import',
+    metadataVerified: false,
+    metadataEditedManually: true,
+    metadataUpdatedAt: nowIso(),
+    updatedAt: '刚刚整理'
+  };
+  return { album: next, changed: existing !== JSON.stringify(next) };
 }
 
 function metadataValue(body: Record<string, unknown>, keys: string[]) {
@@ -2024,6 +2190,86 @@ app.get('/api/debug/search-test', async (req, res) => {
       results: [],
       elapsedMs: Date.now() - startedAt,
       errorMessage: error instanceof Error ? error.message : 'Search failed'
+    });
+  }
+});
+
+app.get('/api/metadata/export-template', (_req, res) => {
+  const state = readState();
+  const items = state.albums.map((album) => albumToMetadataTemplate(album));
+  res.setHeader('Content-Disposition', 'attachment; filename="private-audio-room-metadata-template.json"');
+  res.json(items);
+});
+
+app.post('/api/metadata/import', (req, res) => {
+  let items: MetadataTemplateItem[] = [];
+  try {
+    items = metadataItemsFromBody(req.body);
+  } catch (error) {
+    return res.status(400).json({ error: error instanceof Error ? error.message : 'metadata JSON 格式错误' });
+  }
+
+  const state = readStateForMetadataImport();
+  const nextState: AppState = JSON.parse(JSON.stringify(state));
+  const byId = new Map(nextState.albums.map((album, index) => [album.id, index]));
+  const byTitle = new Map(nextState.albums.map((album, index) => [normalizeMetadataMatchKey(album.title), index]));
+  const results: MetadataImportAlbumResult[] = [];
+  const notMatched: string[] = [];
+  const errors: string[] = [];
+  let updated = 0;
+  let skipped = 0;
+
+  for (const item of items) {
+    const label = item.originalTitle || item.id;
+    try {
+      const index =
+        (item.id ? byId.get(item.id) : undefined) ??
+        (item.originalTitle ? byTitle.get(normalizeMetadataMatchKey(item.originalTitle)) : undefined);
+      if (index === undefined) {
+        notMatched.push(label);
+        results.push({ originalTitle: label, id: item.id || undefined, status: 'notMatched', message: '没有匹配到现有专辑' });
+        continue;
+      }
+
+      const applied = applyMetadataTemplateItem(nextState.albums[index], item);
+      if (!applied.changed) {
+        skipped += 1;
+        results.push({ originalTitle: label, id: nextState.albums[index].id, status: 'skipped', message: '资料没有变化' });
+        continue;
+      }
+
+      nextState.albums[index] = applied.album;
+      updated += 1;
+      results.push({ originalTitle: label, id: applied.album.id, status: 'updated', message: '已更新资料字段' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '导入失败';
+      errors.push(`${label}: ${message}`);
+      results.push({ originalTitle: label, id: item.id || undefined, status: 'error', message });
+    }
+  }
+
+  try {
+    const backupFile = backupStateBeforeMetadataImport(state);
+    if (updated > 0) writeMetadataImportState(nextState);
+    const result: MetadataImportResult = {
+      total: items.length,
+      updated,
+      skipped,
+      notMatched,
+      errors,
+      results,
+      backupFile
+    };
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({
+      error: error instanceof Error ? error.message : '导入前备份或写入失败，state.json 未完成更新',
+      total: items.length,
+      updated: 0,
+      skipped,
+      notMatched,
+      errors,
+      results
     });
   }
 });

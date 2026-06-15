@@ -18,6 +18,9 @@ export type Album = {
   id: string;
   kind: MediaKind;
   title: string;
+  displayTitle?: string;
+  season?: string;
+  category?: string;
   subtitle: string;
   cover: string;
   coverUpdatedAt?: number;
@@ -35,6 +38,11 @@ export type Album = {
   genres?: string[];
   relationship?: string;
   audience?: string;
+  cp?: string;
+  era?: string;
+  topics?: string[];
+  mainCV?: MetadataMainCV[];
+  note?: string;
   finishStatus?: string;
   metadataSources?: string[];
   metadataSource?: string;
@@ -48,6 +56,45 @@ export type Album = {
   aiMetaStatus?: 'none' | 'suggested' | 'saved' | 'failed';
   aiMetaUpdatedAt?: string;
   episodes: Episode[];
+};
+
+export type MetadataMainCV = {
+  role: string;
+  actor: string;
+};
+
+export type MetadataTemplateItem = {
+  id: string;
+  originalTitle: string;
+  displayTitle: string;
+  season: string;
+  category: string;
+  status: string;
+  relationship: string;
+  cp: string;
+  era: string;
+  topics: string[];
+  tags: string[];
+  mainCV: MetadataMainCV[];
+  description: string;
+  note: string;
+};
+
+export type MetadataImportAlbumResult = {
+  originalTitle: string;
+  id?: string;
+  status: 'updated' | 'skipped' | 'notMatched' | 'error';
+  message?: string;
+};
+
+export type MetadataImportResult = {
+  total: number;
+  updated: number;
+  skipped: number;
+  notMatched: string[];
+  errors: string[];
+  results: MetadataImportAlbumResult[];
+  backupFile?: string;
 };
 
 export type PlaybackProgress = {

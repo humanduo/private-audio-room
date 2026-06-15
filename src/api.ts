@@ -9,6 +9,8 @@ import type {
   MetadataAnalyzeEstimate,
   MetadataAnalyzeJob,
   MetadataAnalyzeMode,
+  MetadataImportResult,
+  MetadataTemplateItem,
   NasConfig,
   SearchMode,
   UserProfile
@@ -206,6 +208,24 @@ export async function fetchAiPendingMetadata(): Promise<AiPendingMetadata[]> {
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'AI 待确认加载失败');
   return data.items;
+}
+
+export async function exportMetadataTemplate(): Promise<MetadataTemplateItem[]> {
+  const response = await fetch('/api/metadata/export-template');
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || '资料模板导出失败');
+  return data;
+}
+
+export async function importMetadataTemplate(items: MetadataTemplateItem[]): Promise<MetadataImportResult> {
+  const response = await fetch('/api/metadata/import', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(items)
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || '资料导入失败');
+  return data;
 }
 
 export async function approveAiPendingMetadata(id: string): Promise<{ item: AiPendingMetadata; album: Album }> {
