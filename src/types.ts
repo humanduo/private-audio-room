@@ -68,6 +68,7 @@ export type MetadataTemplateItem = {
   originalTitle: string;
   displayTitle: string;
   season: string;
+  author: string;
   category: string;
   status: string;
   relationship: string;

@@ -2817,10 +2817,12 @@ function AlbumDrawer({
                 ))}
               </div>
               <div className="metadata-grid">
-                <div>
-                  <span>作者</span>
-                  <strong>{album.author || '未填写'}</strong>
-                </div>
+                {album.author ? (
+                  <div>
+                    <span>原著作者</span>
+                    <strong>{album.author}</strong>
+                  </div>
+                ) : null}
                 <div>
                   <span>配音</span>
                   {album.cast?.length ? (
