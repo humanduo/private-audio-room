@@ -33,6 +33,7 @@ import {
   fetchNas,
   fetchProfile,
   generateAlbumCover,
+  downloadCvAvatarTodo,
   importAlbumCoversZip,
   importMetadataTemplate,
   refreshCvAvatars,
@@ -154,6 +155,16 @@ function coverBackground(cover?: string) {
   return `url(${JSON.stringify(cover)})`;
 }
 
+function mediaArtworkUrl(cover?: string) {
+  if (!cover || cover.includes('gradient(')) return '';
+  if (cover.startsWith('data:image/')) return cover;
+  try {
+    return new URL(cover, window.location.href).href;
+  } catch {
+    return '';
+  }
+}
+
 function isImageCover(cover?: string) {
   return Boolean(cover && !cover.includes('gradient('));
 }
@@ -164,6 +175,17 @@ function formatClock(seconds: number) {
   const minutes = Math.floor(total / 60);
   const rest = total % 60;
   return `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`;
+}
+
+function formatRemainingTime(ms: number) {
+  if (!Number.isFinite(ms) || ms <= 0) return '00:00';
+  const totalSeconds = Math.ceil(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return hours > 0
+    ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+    : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
 function splitList(value: string) {
@@ -416,9 +438,13 @@ export function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [audioTime, setAudioTime] = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
+  const [sleepTimerTargetAt, setSleepTimerTargetAt] = useState<number | null>(null);
+  const [sleepTimerRemainingMs, setSleepTimerRemainingMs] = useState(0);
+  const [sleepTimerLabel, setSleepTimerLabel] = useState('');
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const lastProgressSaveRef = useRef(0);
   const restoringProgressRef = useRef(false);
+  const sleepTimerTimeoutRef = useRef<number | null>(null);
 
   async function load(kind = activeKind, q = query, category = activeCategory, mode = searchMode) {
     setIsLoading(true);
@@ -571,6 +597,76 @@ export function App() {
     void playAlbum(displayedPlayerAlbum, displayedPlayerEpisode);
   }
 
+  function clearSleepTimer(showNotice = true) {
+    if (sleepTimerTimeoutRef.current) {
+      window.clearTimeout(sleepTimerTimeoutRef.current);
+      sleepTimerTimeoutRef.current = null;
+    }
+    setSleepTimerTargetAt(null);
+    setSleepTimerRemainingMs(0);
+    setSleepTimerLabel('');
+    if (showNotice) setNotice('定时关闭已取消');
+  }
+
+  function scheduleSleepTimer(targetAt: number, label: string) {
+    const delay = targetAt - Date.now();
+    if (!Number.isFinite(delay) || delay <= 0) {
+      setNotice('请选择一个未来的关闭时间');
+      return;
+    }
+    if (sleepTimerTimeoutRef.current) {
+      window.clearTimeout(sleepTimerTimeoutRef.current);
+      sleepTimerTimeoutRef.current = null;
+    }
+    setSleepTimerTargetAt(targetAt);
+    setSleepTimerRemainingMs(delay);
+    setSleepTimerLabel(label);
+    sleepTimerTimeoutRef.current = window.setTimeout(() => {
+      const audio = audioRef.current;
+      if (audio) audio.pause();
+      setIsPlaying(false);
+      setSleepTimerTargetAt(null);
+      setSleepTimerRemainingMs(0);
+      setSleepTimerLabel('');
+      sleepTimerTimeoutRef.current = null;
+      setNotice('定时关闭已到点，已暂停播放');
+    }, delay);
+    setNotice(`已设置定时关闭：${label}`);
+  }
+
+  function scheduleSleepTimerAfterMinutes(minutes: number) {
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+      setNotice('请输入大于 0 的分钟数');
+      return;
+    }
+    scheduleSleepTimer(Date.now() + Math.round(minutes * 60 * 1000), `${Math.round(minutes)} 分钟后`);
+  }
+
+  function scheduleSleepTimerAtClock(value: string) {
+    const match = value.trim().match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) {
+      setNotice('请输入正确时间，比如 23:30 或 24:00');
+      return;
+    }
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    if (hour < 0 || hour > 24 || minute < 0 || minute > 59 || (hour === 24 && minute !== 0)) {
+      setNotice('时间范围应为 00:00 到 24:00');
+      return;
+    }
+    const now = new Date();
+    const target = new Date(now);
+    if (hour === 24) {
+      target.setDate(target.getDate() + 1);
+      target.setHours(0, 0, 0, 0);
+    } else {
+      target.setHours(hour, minute, 0, 0);
+      if (target.getTime() <= now.getTime()) target.setDate(target.getDate() + 1);
+    }
+    const dayLabel = hour === 24 || target.toDateString() === now.toDateString() ? '今天' : '明天';
+    scheduleSleepTimer(target.getTime(), `${dayLabel} ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`);
+  }
+
   function patchAlbumInState(nextAlbum: Album) {
     setAlbums((current) => current.map((album) => (album.id === nextAlbum.id ? nextAlbum : album)));
     setPlayerAlbum((current) => (current?.id === nextAlbum.id ? nextAlbum : current));
@@ -628,6 +724,65 @@ export function App() {
       window.removeEventListener('beforeunload', flushPlaybackProgress);
     };
   });
+
+  useEffect(() => {
+    if (!sleepTimerTargetAt) return undefined;
+    const tick = () => setSleepTimerRemainingMs(Math.max(0, sleepTimerTargetAt - Date.now()));
+    tick();
+    const interval = window.setInterval(tick, 1000);
+    return () => window.clearInterval(interval);
+  }, [sleepTimerTargetAt]);
+
+  useEffect(() => {
+    if (!('mediaSession' in navigator) || !('MediaMetadata' in window) || !displayedPlayerAlbum || !displayedPlayerEpisode) return;
+    const setMediaAction = (action: MediaSessionAction, handler: MediaSessionActionHandler | null) => {
+      try {
+        navigator.mediaSession.setActionHandler(action, handler);
+      } catch {
+        // Some mobile browsers expose Media Session but only support a subset of actions.
+      }
+    };
+    const artworkUrl = mediaArtworkUrl(displayedPlayerAlbum.cover);
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: displayedPlayerEpisode.title || displayedPlayerAlbum.title,
+      artist: displayedPlayerAlbum.title,
+      album: displayedPlayerAlbum.season ? `${displayedPlayerAlbum.displayTitle || displayedPlayerAlbum.title} ${displayedPlayerAlbum.season}` : displayedPlayerAlbum.title,
+      artwork: artworkUrl
+        ? [
+            { src: artworkUrl, sizes: '96x96', type: 'image/png' },
+            { src: artworkUrl, sizes: '256x256', type: 'image/png' },
+            { src: artworkUrl, sizes: '512x512', type: 'image/png' }
+          ]
+        : []
+    });
+    navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+    setMediaAction('play', () => {
+      void playAlbum(displayedPlayerAlbum, displayedPlayerEpisode);
+    });
+    setMediaAction('pause', () => {
+      const audio = audioRef.current;
+      if (audio) audio.pause();
+      setIsPlaying(false);
+    });
+    setMediaAction('seekbackward', (details) => {
+      seekAudio(Math.max(0, (audioRef.current?.currentTime || displayedTime) - (details.seekOffset || 15)));
+    });
+    setMediaAction('seekforward', (details) => {
+      seekAudio((audioRef.current?.currentTime || displayedTime) + (details.seekOffset || 15));
+    });
+    return () => {
+      setMediaAction('play', null);
+      setMediaAction('pause', null);
+      setMediaAction('seekbackward', null);
+      setMediaAction('seekforward', null);
+    };
+  }, [displayedPlayerAlbum, displayedPlayerEpisode, displayedTime, isPlaying]);
+
+  useEffect(() => {
+    return () => {
+      if (sleepTimerTimeoutRef.current) window.clearTimeout(sleepTimerTimeoutRef.current);
+    };
+  }, []);
 
   async function handleScan() {
     try {
@@ -895,6 +1050,12 @@ export function App() {
               onAlbumUpdated={patchAlbumInState}
               onMetadataImported={() => load()}
               onOpen={setSelectedAlbum}
+              sleepTimerTargetAt={sleepTimerTargetAt}
+              sleepTimerRemainingMs={sleepTimerRemainingMs}
+              sleepTimerLabel={sleepTimerLabel}
+              onScheduleSleepTimerMinutes={scheduleSleepTimerAfterMinutes}
+              onScheduleSleepTimerClock={scheduleSleepTimerAtClock}
+              onCancelSleepTimer={clearSleepTimer}
             />
           ) : null}
         </section>
@@ -953,6 +1114,8 @@ export function App() {
         </nav>
         <audio
           ref={audioRef}
+          preload="auto"
+          playsInline
           onPause={() => {
             setIsPlaying(false);
             void savePlaybackProgress(true);
@@ -1846,7 +2009,13 @@ function MeView({
   onAnalyzeLibrary,
   onAlbumUpdated,
   onMetadataImported,
-  onOpen
+  onOpen,
+  sleepTimerTargetAt,
+  sleepTimerRemainingMs,
+  sleepTimerLabel,
+  onScheduleSleepTimerMinutes,
+  onScheduleSleepTimerClock,
+  onCancelSleepTimer
 }: {
   nas: NasConfig | null;
   albums: Album[];
@@ -1862,6 +2031,12 @@ function MeView({
   onAlbumUpdated: (album: Album) => void;
   onMetadataImported: () => Promise<void>;
   onOpen: (album: Album) => void;
+  sleepTimerTargetAt: number | null;
+  sleepTimerRemainingMs: number;
+  sleepTimerLabel: string;
+  onScheduleSleepTimerMinutes: (minutes: number) => void;
+  onScheduleSleepTimerClock: (value: string) => void;
+  onCancelSleepTimer: (showNotice?: boolean) => void;
 }) {
   const [categoryName, setCategoryName] = useState('');
   const [avatar, setAvatar] = useState('');
@@ -1883,6 +2058,10 @@ function MeView({
   const [coverImportFile, setCoverImportFile] = useState<File | null>(null);
   const [isImportingCovers, setIsImportingCovers] = useState(false);
   const [coverImportResult, setCoverImportResult] = useState<CoverImportResult | null>(null);
+  const [isExportingCvTodo, setIsExportingCvTodo] = useState(false);
+  const [isSleepTimerOpen, setIsSleepTimerOpen] = useState(false);
+  const [sleepMinutes, setSleepMinutes] = useState('30');
+  const [sleepClock, setSleepClock] = useState('24:00');
   const isAnalyzingLibrary = metadataAnalyzeJob?.status === 'queued' || metadataAnalyzeJob?.status === 'running';
   const metadataAnalyzePercent = metadataAnalyzeJob?.total
     ? Math.round((metadataAnalyzeJob.processed / metadataAnalyzeJob.total) * 100)
@@ -2036,6 +2215,18 @@ function MeView({
     }
   }
 
+  async function handleExportCvAvatarTodo() {
+    setIsExportingCvTodo(true);
+    setMetadataTransferError('');
+    try {
+      await downloadCvAvatarTodo();
+    } catch (error) {
+      setMetadataTransferError(error instanceof Error ? error.message : 'CV 头像清单导出失败');
+    } finally {
+      setIsExportingCvTodo(false);
+    }
+  }
+
   async function handleImportMetadataFile(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = '';
@@ -2093,6 +2284,17 @@ function MeView({
     } finally {
       setIsImportingCovers(false);
     }
+  }
+
+  function submitSleepMinutes(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const minutes = Number(sleepMinutes);
+    onScheduleSleepTimerMinutes(minutes);
+  }
+
+  function submitSleepClock(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    onScheduleSleepTimerClock(sleepClock);
   }
 
   const myTools: Array<{ icon: SketchIconName; label: string; note: string }> = [
@@ -2206,6 +2408,17 @@ function MeView({
             </button>
           </div>
         </div>
+        <div className="cover-import-box">
+          <div>
+            <strong>CV 头像清单</strong>
+            <span>从当前资料里的 CV / 配音演员自动统计待补头像清单，按出现次数排序，方便优先补高频头像。</span>
+          </div>
+          <div className="button-row">
+            <button className="filled" disabled={isExportingCvTodo} onClick={() => void handleExportCvAvatarTodo()}>
+              {isExportingCvTodo ? '导出中' : '导出 CV 头像清单'}
+            </button>
+          </div>
+        </div>
         {metadataTransferError ? <p className="metadata-transfer-error">{metadataTransferError}</p> : null}
         {metadataImportResult ? (
           <div className="metadata-import-result">
@@ -2304,13 +2517,67 @@ function MeView({
           <span>{isAnalyzingLibrary ? '整理中' : 'DeepSeek 整理'}</span>
         </button>
         {myTools.map((tool) => (
-          <button key={tool.label}>
+          <button key={tool.label} onClick={tool.icon === 'timer' ? () => setIsSleepTimerOpen(true) : undefined}>
             <SketchIcon name={tool.icon} decorated />
             <strong>{tool.label}</strong>
-            <span>{tool.note}</span>
+            <span>{tool.icon === 'timer' && sleepTimerTargetAt ? `剩余 ${formatRemainingTime(sleepTimerRemainingMs)}` : tool.note}</span>
           </button>
         ))}
       </div>
+
+      {isSleepTimerOpen ? (
+        <div className="metadata-dialog sleep-timer-dialog" role="dialog" aria-label="定时关闭">
+          <div className="metadata-dialog-card sleep-timer-card">
+            <div className="metadata-dialog-head">
+              <strong>定时关闭</strong>
+              <button onClick={() => setIsSleepTimerOpen(false)}>关闭</button>
+            </div>
+            <p>到点后会暂停当前正在播放的音频。</p>
+            {sleepTimerTargetAt ? (
+              <div className="sleep-timer-current">
+                <span>已设置</span>
+                <strong>{sleepTimerLabel}</strong>
+                <small>剩余 {formatRemainingTime(sleepTimerRemainingMs)}</small>
+                <button onClick={() => onCancelSleepTimer()}>取消定时</button>
+              </div>
+            ) : null}
+            <div className="sleep-timer-presets">
+              {[15, 30, 45, 60, 90].map((minutes) => (
+                <button key={minutes} onClick={() => onScheduleSleepTimerMinutes(minutes)}>
+                  {minutes} 分钟
+                </button>
+              ))}
+            </div>
+            <form className="sleep-timer-form" onSubmit={submitSleepMinutes}>
+              <label htmlFor="sleep-minutes">多少分钟后关闭</label>
+              <div>
+                <input
+                  id="sleep-minutes"
+                  inputMode="numeric"
+                  value={sleepMinutes}
+                  onChange={(event) => setSleepMinutes(event.target.value.replace(/[^\d]/g, ''))}
+                  placeholder="30"
+                />
+                <button>设置</button>
+              </div>
+            </form>
+            <form className="sleep-timer-form" onSubmit={submitSleepClock}>
+              <label htmlFor="sleep-clock">按当前时间关闭</label>
+              <div>
+                <input
+                  id="sleep-clock"
+                  inputMode="numeric"
+                  value={sleepClock}
+                  onChange={(event) => setSleepClock(event.target.value)}
+                  placeholder="24:00"
+                />
+                <button>设置</button>
+              </div>
+              <small>支持 24:00、23:30、11:00；如果时间已过，会自动设为明天。</small>
+            </form>
+          </div>
+        </div>
+      ) : null}
 
       {metadataAnalyzeJob ? (
         <section className="metadata-progress-card">

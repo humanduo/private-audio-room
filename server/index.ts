@@ -3130,6 +3130,75 @@ app.post('/api/cv-avatars/refresh', async (req, res) => {
   res.json({ profile: state.profile, updated, total: names.length });
 });
 
+// Build the album display label (displayTitle + season) used in the CV todo export.
+function albumLabelForCvTodo(album: Album) {
+  const parts = [album.displayTitle || album.title];
+  const season = stringField(album.season, 40);
+  if (season) parts.push(season);
+  return parts.join(' ').trim() || album.title;
+}
+
+// Quote a single CSV field per RFC 4180: wrap in double quotes when the value
+// contains a comma, double quote, or newline, and escape inner quotes.
+function csvField(value: string) {
+  const text = String(value ?? '');
+  if (/[",\n\r]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+  return text;
+}
+
+app.get('/api/cv-avatars/todo-export', (_req, res) => {
+  const state = readState();
+  type CvStat = {
+    actor: string;
+    appearCount: number;
+    albumLabels: Set<string>;
+    roles: Set<string>;
+  };
+  const stats = new Map<string, CvStat>();
+  const cvAvatars = state.profile.cvAvatars || {};
+
+  for (const album of state.albums) {
+    const albumLabel = albumLabelForCvTodo(album);
+    const cvItems = album.mainCV?.length
+      ? album.mainCV
+      : uniqueStrings(album.cast || []).map((actor) => ({ actor, role: '' }));
+    for (const cv of cvItems) {
+      const actor = stringField(cv?.actor, 80);
+      if (!actor) continue;
+      const stat = stats.get(actor) || { actor, appearCount: 0, albumLabels: new Set<string>(), roles: new Set<string>() };
+      stat.appearCount += 1;
+      stat.albumLabels.add(albumLabel);
+      const role = stringField(cv?.role, 80);
+      if (role) stat.roles.add(role);
+      stats.set(actor, stat);
+    }
+  }
+
+  const rows = [...stats.values()].sort((a, b) => {
+    if (b.appearCount !== a.appearCount) return b.appearCount - a.appearCount;
+    const albumDiff = b.albumLabels.size - a.albumLabels.size;
+    if (albumDiff !== 0) return albumDiff;
+    return a.actor.localeCompare(b.actor, 'zh-Hans-CN');
+  });
+
+  const header = ['actor', 'appearCount', 'albumCount', 'albums', 'roles', 'suggestedFileName', 'avatarStatus'];
+  const lines = [header.join(',')];
+  for (const stat of rows) {
+    const albums = [...stat.albumLabels].join('; ');
+    const roles = [...stat.roles].join('; ');
+    const suggestedFileName = `${stat.actor}.jpg`;
+    const values = [stat.actor, String(stat.appearCount), String(stat.albumLabels.size), albums, roles, suggestedFileName, cvAvatars[stat.actor] ? 'exists' : 'missing'];
+    lines.push(values.map(csvField).join(','));
+  }
+  // Prepend a UTF-8 BOM so Excel opens Chinese filenames correctly.
+  const csv = `\ufeff${lines.join('\r\n')}`;
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="cv-avatar-todo.csv"');
+  res.send(csv);
+});
+
+
 app.get('/api/nas', (_req, res) => {
   res.json({ nas: readState().nas });
 });

@@ -241,6 +241,28 @@ export async function importAlbumCoversZip(file: File): Promise<CoverImportResul
   return data;
 }
 
+// Fetch the CV avatar todo list as CSV and trigger a browser download.
+// Returns the number of CV rows downloaded for UI feedback.
+export async function downloadCvAvatarTodo(): Promise<number> {
+  const response = await fetch('/api/cv-avatars/todo-export');
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || 'CV 头像清单导出失败');
+  }
+  const blob = await response.blob();
+  const text = await blob.text();
+  const lines = text.replace(/^\ufeff/, '').split(/\r\n|\r|\n/).filter(Boolean);
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'cv-avatar-todo.csv';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return Math.max(0, lines.length - 1);
+}
+
 export async function approveAiPendingMetadata(id: string): Promise<{ item: AiPendingMetadata; album: Album }> {
   const response = await fetch(`/api/metadata/pending/${id}/approve`, { method: 'POST' });
   const data = await response.json();
