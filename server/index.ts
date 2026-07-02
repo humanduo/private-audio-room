@@ -1,6 +1,7 @@
 import cors from 'cors';
 import express from 'express';
 import AdmZip from 'adm-zip';
+import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import dns from 'node:dns/promises';
 import fs from 'node:fs';
@@ -169,7 +170,8 @@ function normalizeState(state: Partial<AppState>): AppState {
       ...episode,
       relativePath:
         episode.relativePath ||
-        (episode.filePath && root && isPathInsideRoot(episode.filePath, root) ? path.relative(root, episode.filePath) : episode.relativePath)
+        (episode.filePath && root && isPathInsideRoot(episode.filePath, root) ? path.relative(root, episode.filePath) : episode.relativePath),
+      duration: validDurationLabel(episode.duration) ? episode.duration : formatDurationLabel(episode.durationSeconds || 0)
     })),
     cast: album.cast?.length ? album.cast : siblingCastForAlbum(album, albums)
   }));
@@ -1722,7 +1724,11 @@ function mergeManualMetadata(scanned: Album[], existing: Album[]) {
         currentTime: finiteNumber(previous.currentTime, episode.currentTime || 0),
         durationSeconds: finiteNumber(previous.durationSeconds, episode.durationSeconds || 0),
         lastPlayedAt: previous.lastPlayedAt || episode.lastPlayedAt,
-        duration: previous.duration && previous.duration !== '--:--' ? previous.duration : episode.duration
+        duration: validDurationLabel(previous.duration)
+          ? previous.duration
+          : validDurationLabel(episode.duration)
+            ? episode.duration
+            : formatDurationLabel(finiteNumber(previous.durationSeconds, episode.durationSeconds || 0))
       };
     });
   }
@@ -1803,6 +1809,276 @@ function audioContentType(filePath: string) {
   if (lower.endsWith('wav')) return 'audio/wav';
   if (lower.endsWith('ogg') || lower.endsWith('opus')) return 'audio/ogg';
   return 'application/octet-stream';
+}
+
+function formatDurationLabel(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '--:--';
+  const total = Math.round(seconds);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const rest = total % 60;
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`;
+  return `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`;
+}
+
+function validDurationLabel(duration?: string) {
+  return Boolean(duration && duration !== '--:--' && duration !== '00:00');
+}
+
+function readFdBuffer(fd: number, position: number, length: number) {
+  const buffer = Buffer.alloc(length);
+  const bytesRead = fs.readSync(fd, buffer, 0, length, position);
+  return bytesRead === length ? buffer : buffer.subarray(0, bytesRead);
+}
+
+function readMp4DurationSeconds(filePath: string) {
+  const stat = fs.statSync(filePath);
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    function readBox(start: number, end: number, depth = 0): number {
+      if (depth > 8) return 0;
+      let offset = start;
+      while (offset + 8 <= end && offset + 8 <= stat.size) {
+        const header = readFdBuffer(fd, offset, 16);
+        if (header.length < 8) break;
+        const size32 = header.readUInt32BE(0);
+        const type = header.toString('ascii', 4, 8);
+        let headerSize = 8;
+        let size = size32;
+        if (size32 === 1 && header.length >= 16) {
+          const bigSize = header.readBigUInt64BE(8);
+          if (bigSize > BigInt(Number.MAX_SAFE_INTEGER)) return 0;
+          size = Number(bigSize);
+          headerSize = 16;
+        } else if (size32 === 0) {
+          size = end - offset;
+        }
+        if (size < headerSize || offset + size > stat.size) break;
+        const contentStart = offset + headerSize;
+        const contentEnd = offset + size;
+        if (type === 'mvhd') {
+          const mvhd = readFdBuffer(fd, contentStart, 32);
+          if (mvhd.length < 20) return 0;
+          const version = mvhd.readUInt8(0);
+          if (version === 1 && mvhd.length >= 32) {
+            const timescale = mvhd.readUInt32BE(20);
+            const duration = mvhd.readBigUInt64BE(24);
+            return timescale ? Number(duration) / timescale : 0;
+          }
+          const timescale = mvhd.readUInt32BE(12);
+          const duration = mvhd.readUInt32BE(16);
+          return timescale ? duration / timescale : 0;
+        }
+        if (type === 'moov' || type === 'trak' || type === 'mdia') {
+          const nested = readBox(contentStart, contentEnd, depth + 1);
+          if (nested > 0) return nested;
+        }
+        offset += size;
+      }
+      return 0;
+    }
+
+    return readBox(0, stat.size);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function readMp3DurationSeconds(filePath: string) {
+  const stat = fs.statSync(filePath);
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const header = Buffer.alloc(Math.min(256 * 1024, stat.size));
+    fs.readSync(fd, header, 0, header.length, 0);
+    let offset = 0;
+    if (header.length >= 10 && header.toString('ascii', 0, 3) === 'ID3') {
+      const id3Size = ((header[6] & 0x7f) << 21) | ((header[7] & 0x7f) << 14) | ((header[8] & 0x7f) << 7) | (header[9] & 0x7f);
+      offset = 10 + id3Size;
+    }
+
+    const bitrates: Record<number, number[]> = {
+      1: [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+      2: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160]
+    };
+    const sampleRates: Record<number, number[]> = {
+      3: [44100, 48000, 32000],
+      2: [22050, 24000, 16000],
+      0: [11025, 12000, 8000]
+    };
+
+    for (let i = offset; i + 4 < header.length; i += 1) {
+      if (header[i] !== 0xff || (header[i + 1] & 0xe0) !== 0xe0) continue;
+      const versionBits = (header[i + 1] >> 3) & 0x03;
+      const layerBits = (header[i + 1] >> 1) & 0x03;
+      const bitrateIndex = (header[i + 2] >> 4) & 0x0f;
+      const sampleRateIndex = (header[i + 2] >> 2) & 0x03;
+      const channelMode = (header[i + 3] >> 6) & 0x03;
+      if (versionBits === 1 || layerBits !== 1 || bitrateIndex === 0 || bitrateIndex === 15 || sampleRateIndex === 3) continue;
+
+      const bitrateTable = versionBits === 3 ? bitrates[1] : bitrates[2];
+      const sampleRateTable = sampleRates[versionBits];
+      const bitrate = (bitrateTable?.[bitrateIndex] || 0) * 1000;
+      const sampleRate = sampleRateTable?.[sampleRateIndex] || 0;
+      if (!bitrate || !sampleRate) continue;
+
+      const samplesPerFrame = versionBits === 3 ? 1152 : 576;
+      const xingOffset = i + 4 + (versionBits === 3 ? (channelMode === 3 ? 17 : 32) : channelMode === 3 ? 9 : 17);
+      if (xingOffset + 16 < header.length) {
+        const marker = header.toString('ascii', xingOffset, xingOffset + 4);
+        if (marker === 'Xing' || marker === 'Info') {
+          const flags = header.readUInt32BE(xingOffset + 4);
+          if (flags & 0x01) {
+            const frames = header.readUInt32BE(xingOffset + 8);
+            if (frames > 0) return (frames * samplesPerFrame) / sampleRate;
+          }
+        }
+      }
+
+      const audioBytes = Math.max(0, stat.size - offset);
+      return (audioBytes * 8) / bitrate;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return 0;
+}
+
+function readWavDurationSeconds(filePath: string) {
+  const stat = fs.statSync(filePath);
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const riff = readFdBuffer(fd, 0, 12);
+    if (riff.length < 12 || riff.toString('ascii', 0, 4) !== 'RIFF' || riff.toString('ascii', 8, 12) !== 'WAVE') return 0;
+    let byteRate = 0;
+    let dataSize = 0;
+    let offset = 12;
+    while (offset + 8 <= stat.size) {
+      const header = readFdBuffer(fd, offset, 8);
+      if (header.length < 8) break;
+      const type = header.toString('ascii', 0, 4);
+      const size = header.readUInt32LE(4);
+      const start = offset + 8;
+      if (type === 'fmt ') {
+        const fmt = readFdBuffer(fd, start, Math.min(size, 16));
+        if (fmt.length >= 12) byteRate = fmt.readUInt32LE(8);
+      }
+      if (type === 'data') dataSize = size;
+      if (byteRate && dataSize) return dataSize / byteRate;
+      offset = start + size + (size % 2);
+    }
+    return 0;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function readFlacDurationSeconds(filePath: string) {
+  const stat = fs.statSync(filePath);
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const magic = readFdBuffer(fd, 0, 4);
+    if (magic.length < 4 || magic.toString('ascii', 0, 4) !== 'fLaC') return 0;
+    let offset = 4;
+    while (offset + 4 <= stat.size) {
+      const header = readFdBuffer(fd, offset, 4);
+      if (header.length < 4) break;
+      const marker = header[0];
+      const type = marker & 0x7f;
+      const size = header.readUIntBE(1, 3);
+      const start = offset + 4;
+      if (type === 0 && size >= 34) {
+        const streamInfo = readFdBuffer(fd, start, 34);
+        if (streamInfo.length < 18) return 0;
+        const sampleRate = (streamInfo[10] << 12) | (streamInfo[11] << 4) | ((streamInfo[12] & 0xf0) >> 4);
+        const totalSamples =
+          (BigInt(streamInfo[13] & 0x0f) << 32n) |
+          (BigInt(streamInfo[14]) << 24n) |
+          (BigInt(streamInfo[15]) << 16n) |
+          (BigInt(streamInfo[16]) << 8n) |
+          BigInt(streamInfo[17]);
+        return sampleRate ? Number(totalSamples) / sampleRate : 0;
+      }
+      offset = start + size;
+      if (marker & 0x80) break;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return 0;
+}
+
+function readAdtsDurationSeconds(filePath: string) {
+  const stat = fs.statSync(filePath);
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const sampleSize = Math.min(512 * 1024, stat.size);
+    const buffer = readFdBuffer(fd, 0, sampleSize);
+    let offset = 0;
+    let frames = 0;
+    let bytes = 0;
+    let sampleRate = 0;
+    const rates = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+    while (offset + 7 <= buffer.length) {
+      if (buffer[offset] !== 0xff || (buffer[offset + 1] & 0xf0) !== 0xf0) break;
+      const protectionAbsent = buffer[offset + 1] & 0x01;
+      const sampleRateIndex = (buffer[offset + 2] >> 2) & 0x0f;
+      const frameLength = ((buffer[offset + 3] & 0x03) << 11) | (buffer[offset + 4] << 3) | ((buffer[offset + 5] & 0xe0) >> 5);
+      sampleRate = sampleRate || rates[sampleRateIndex] || 0;
+      const headerSize = protectionAbsent ? 7 : 9;
+      if (frameLength <= headerSize || offset + frameLength > buffer.length) break;
+      frames += 1;
+      bytes += frameLength;
+      offset += frameLength;
+    }
+    if (!sampleRate || !frames || !bytes) return 0;
+    const avgFrameBytes = bytes / frames;
+    const estimatedFrames = stat.size / avgFrameBytes;
+    return (estimatedFrames * 1024) / sampleRate;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/*
+ * Duration parsing runs only during an explicit NAS scan. Keep all readers
+ * bounded to headers or small samples so a large audiobook file is never loaded
+ * into memory just to show episode length.
+ */
+function probeDurationWithFfprobe(filePath: string) {
+  try {
+    const output = execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nk=1:nw=1', filePath], {
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    const duration = Number.parseFloat(output.trim());
+    return Number.isFinite(duration) && duration > 0 ? duration : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function readAudioDurationSeconds(filePath: string) {
+  try {
+    const ext = path.extname(filePath).toLowerCase();
+    const duration =
+      ext === '.mp3'
+        ? readMp3DurationSeconds(filePath)
+        : ext === '.m4a' || ext === '.m4b'
+          ? readMp4DurationSeconds(filePath)
+          : ext === '.aac'
+            ? readAdtsDurationSeconds(filePath)
+            : ext === '.wav'
+              ? readWavDurationSeconds(filePath)
+              : ext === '.flac'
+                ? readFlacDurationSeconds(filePath)
+                : 0;
+    if (Number.isFinite(duration) && duration > 0) return Math.round(duration);
+  } catch (error) {
+    console.warn(`[scan] duration parse failed for ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const ffprobeDuration = probeDurationWithFfprobe(filePath);
+  return ffprobeDuration > 0 ? Math.round(ffprobeDuration) : 0;
 }
 
 function fallbackCover(kind: MediaKind) {
@@ -2241,10 +2517,12 @@ function albumsFromFiles(root: string, files: string[]): Album[] {
       aiMetaUpdatedAt: '',
       episodes: sortedFiles.map((file, fileIndex) => {
         const relativePath = path.relative(root, file);
+        const durationSeconds = readAudioDurationSeconds(file);
         return {
           id: `ep-${stableId(relativePath, 24)}`,
           title: cleanEpisodeTitle(file, title, fileIndex),
-          duration: '--:--',
+          duration: formatDurationLabel(durationSeconds),
+          durationSeconds,
           progress: 0,
           filePath: file,
           relativePath

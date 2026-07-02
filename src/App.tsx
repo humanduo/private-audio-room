@@ -3860,7 +3860,7 @@ function AlbumDrawer({
                   >
                     <span>{String(index + 1).padStart(2, '0')}</span>
                     <strong>{episode.title}</strong>
-                    <small>{episode.duration}</small>
+                    <small>{episode.durationSeconds ? formatClock(episode.durationSeconds) : episode.duration}</small>
                   </button>
                 ))}
               </div>
