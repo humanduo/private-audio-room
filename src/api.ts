@@ -136,6 +136,17 @@ export async function refreshCvAvatars(names: string[]): Promise<UserProfile> {
   return data.profile;
 }
 
+export async function updateCvAvatar(name: string, avatar: string): Promise<UserProfile> {
+  const response = await fetch('/api/cv-avatars', {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify({ name, avatar })
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'CV 头像保存失败');
+  return data.profile;
+}
+
 export async function fetchNas(): Promise<NasConfig> {
   const response = await fetch('/api/nas');
   if (!response.ok) throw new Error('NAS 状态加载失败');

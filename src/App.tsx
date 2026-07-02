@@ -44,6 +44,7 @@ import {
   scanNas,
   updateEpisodeProgress,
   updateAlbumCover,
+  updateCvAvatar,
   updateAlbumMetadata,
   uploadAlbumCover,
   updateProfileAvatar
@@ -163,6 +164,44 @@ function mediaArtworkUrl(cover?: string) {
   } catch {
     return '';
   }
+}
+
+function mediaArtworkType(src: string) {
+  if (src.startsWith('data:image/webp') || /\.webp(?:$|\?)/i.test(src)) return 'image/webp';
+  if (src.startsWith('data:image/png') || /\.png(?:$|\?)/i.test(src)) return 'image/png';
+  if (src.startsWith('data:image/jpeg') || src.startsWith('data:image/jpg') || /\.(?:jpe?g)(?:$|\?)/i.test(src)) return 'image/jpeg';
+  return 'image/png';
+}
+
+function mediaArtworkItems(cover?: string) {
+  const src = mediaArtworkUrl(cover);
+  if (!src) return [];
+  const type = mediaArtworkType(src);
+  return ['96x96', '128x128', '192x192', '256x256', '512x512'].map((sizes) => ({ src, sizes, type }));
+}
+
+function cleanMediaText(value?: string | null) {
+  const text = String(value || '').trim();
+  return text && text !== 'null' && text !== 'undefined' ? text : '';
+}
+
+function mediaAlbumTitle(album?: Album | null) {
+  if (!album) return 'Private Audio Room';
+  const base = cleanMediaText(album.displayTitle) || cleanMediaText(album.title);
+  const season = cleanMediaText(album.season);
+  return [base, season].filter(Boolean).join(' ') || 'Private Audio Room';
+}
+
+function mediaEpisodeTitle(album?: Album | null, episode?: Episode | null) {
+  return cleanMediaText(episode?.title) || mediaAlbumTitle(album);
+}
+
+function mediaArtistText(album?: Album | null) {
+  return mediaAlbumTitle(album) || 'Private Audio Room';
+}
+
+function mediaAlbumText(album?: Album | null) {
+  return cleanMediaText(album?.author) || cleanMediaText(album?.displayTitle) || cleanMediaText(album?.title) || 'Private Audio Room';
 }
 
 function isImageCover(cover?: string) {
@@ -442,6 +481,9 @@ export function App() {
   const [sleepTimerRemainingMs, setSleepTimerRemainingMs] = useState(0);
   const [sleepTimerLabel, setSleepTimerLabel] = useState('');
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const mediaAlbumRef = useRef<Album | null>(null);
+  const mediaEpisodeRef = useRef<Episode | null | undefined>(null);
+  const playAlbumRef = useRef<((album: Album, episode?: Episode) => Promise<void>) | null>(null);
   const lastProgressSaveRef = useRef(0);
   const restoringProgressRef = useRef(false);
   const sleepTimerTimeoutRef = useRef<number | null>(null);
@@ -503,6 +545,86 @@ export function App() {
       ? Math.min(100, Math.round((selectedAlbumTime / selectedAlbumDuration) * 100))
       : selectedAlbumSnapshot.progress;
 
+  function mediaSession() {
+    return 'mediaSession' in navigator ? navigator.mediaSession : null;
+  }
+
+  function setMediaPlaybackState(state: MediaSessionPlaybackState) {
+    const session = mediaSession();
+    if (!session) return;
+    try {
+      session.playbackState = state;
+    } catch {
+      // Some browsers expose Media Session partially.
+    }
+  }
+
+  function updateMediaPositionState(audio = audioRef.current) {
+    const session = mediaSession();
+    if (!session?.setPositionState || !audio) return;
+    const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0;
+    const position = Number.isFinite(audio.currentTime) ? Math.max(0, Math.min(audio.currentTime, duration || audio.currentTime)) : 0;
+    if (!duration || !Number.isFinite(position)) return;
+    try {
+      session.setPositionState({
+        duration,
+        position,
+        playbackRate: Number.isFinite(audio.playbackRate) && audio.playbackRate > 0 ? audio.playbackRate : 1
+      });
+    } catch {
+      // Position state is optional and strict about numeric values.
+    }
+  }
+
+  function updateMediaMetadata(album = mediaAlbumRef.current, episode = mediaEpisodeRef.current) {
+    const session = mediaSession();
+    if (!session || !('MediaMetadata' in window) || !album) return;
+    try {
+      session.metadata = new MediaMetadata({
+        title: mediaEpisodeTitle(album, episode),
+        artist: mediaArtistText(album),
+        album: mediaAlbumText(album),
+        artwork: mediaArtworkItems(album.cover)
+      });
+    } catch {
+      // Metadata should never break playback.
+    }
+  }
+
+  function setMediaAction(action: MediaSessionAction, handler: MediaSessionActionHandler | null) {
+    const session = mediaSession();
+    if (!session) return;
+    try {
+      session.setActionHandler(action, handler);
+    } catch {
+      // Some mobile browsers expose Media Session but only support a subset of actions.
+    }
+  }
+
+  function seekAudioElement(nextTime: number) {
+    const audio = audioRef.current;
+    if (!audio || !Number.isFinite(nextTime)) return;
+    const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : displayedDuration || 0;
+    const clamped = Math.max(0, Math.min(nextTime, duration || nextTime));
+    if ('fastSeek' in audio && typeof audio.fastSeek === 'function') audio.fastSeek(clamped);
+    else audio.currentTime = clamped;
+    setAudioTime(audio.currentTime);
+    updateMediaPositionState(audio);
+  }
+
+  function playAdjacentEpisode(offset: -1 | 1) {
+    const album = mediaAlbumRef.current;
+    const episode = mediaEpisodeRef.current;
+    if (!album?.episodes.length) return;
+    const activeIndex = Math.max(
+      0,
+      album.episodes.findIndex((item) => item.id === episode?.id)
+    );
+    const candidates = offset < 0 ? album.episodes.slice(0, activeIndex).reverse() : album.episodes.slice(activeIndex + 1);
+    const nextEpisode = candidates.find((item) => item.filePath);
+    if (nextEpisode) void playAlbumRef.current?.(album, nextEpisode);
+  }
+
   function nextPlayableEpisode(album: Album) {
     return activeEpisodeForAlbum(album);
   }
@@ -523,12 +645,19 @@ export function App() {
       setNotice('这个条目还没有真实音频文件，请先在 NAS 文件页扫描音频');
       setPlayerAlbum(album);
       setPlayerEpisode(episode || null);
+      mediaAlbumRef.current = album;
+      mediaEpisodeRef.current = episode || null;
+      updateMediaMetadata(album, episode);
+      setMediaPlaybackState('none');
       setIsPlaying(false);
       return;
     }
 
     setPlayerAlbum(album);
     setPlayerEpisode(episode);
+    mediaAlbumRef.current = album;
+    mediaEpisodeRef.current = episode;
+    updateMediaMetadata(album, episode);
     setSelectedAlbum((current) => (current?.id === album.id ? album : current));
     const audio = audioRef.current;
     if (!audio) return;
@@ -560,6 +689,8 @@ export function App() {
           audio.currentTime = Math.max(0, Math.min(duration - 1, resumeTime));
           setAudioTime(audio.currentTime);
         }
+        updateMediaMetadata(album, episode);
+        updateMediaPositionState(audio);
         restoringProgressRef.current = false;
         console.log('[player] restored after loadedmetadata', {
           albumId: album.id,
@@ -574,11 +705,16 @@ export function App() {
     try {
       await audio.play();
       setIsPlaying(true);
+      setMediaPlaybackState('playing');
+      updateMediaPositionState(audio);
     } catch {
       setNotice('浏览器拦截了自动播放，请再点一次播放按钮');
       setIsPlaying(false);
+      setMediaPlaybackState('paused');
     }
   }
+
+  playAlbumRef.current = playAlbum;
 
   function togglePlay() {
     const audio = audioRef.current;
@@ -591,6 +727,7 @@ export function App() {
     if (isPlaying) {
       audio.pause();
       setIsPlaying(false);
+      setMediaPlaybackState('paused');
       return;
     }
 
@@ -701,10 +838,7 @@ export function App() {
   }
 
   function seekAudio(nextTime: number) {
-    const audio = audioRef.current;
-    if (!audio || !Number.isFinite(nextTime)) return;
-    audio.currentTime = Math.max(0, Math.min(nextTime, displayedDuration || nextTime));
-    setAudioTime(audio.currentTime);
+    seekAudioElement(nextTime);
     void savePlaybackProgress(true);
   }
 
@@ -734,49 +868,64 @@ export function App() {
   }, [sleepTimerTargetAt]);
 
   useEffect(() => {
-    if (!('mediaSession' in navigator) || !('MediaMetadata' in window) || !displayedPlayerAlbum || !displayedPlayerEpisode) return;
-    const setMediaAction = (action: MediaSessionAction, handler: MediaSessionActionHandler | null) => {
-      try {
-        navigator.mediaSession.setActionHandler(action, handler);
-      } catch {
-        // Some mobile browsers expose Media Session but only support a subset of actions.
-      }
-    };
-    const artworkUrl = mediaArtworkUrl(displayedPlayerAlbum.cover);
-    navigator.mediaSession.metadata = new MediaMetadata({
-      title: displayedPlayerEpisode.title || displayedPlayerAlbum.title,
-      artist: displayedPlayerAlbum.title,
-      album: displayedPlayerAlbum.season ? `${displayedPlayerAlbum.displayTitle || displayedPlayerAlbum.title} ${displayedPlayerAlbum.season}` : displayedPlayerAlbum.title,
-      artwork: artworkUrl
-        ? [
-            { src: artworkUrl, sizes: '96x96', type: 'image/png' },
-            { src: artworkUrl, sizes: '256x256', type: 'image/png' },
-            { src: artworkUrl, sizes: '512x512', type: 'image/png' }
-          ]
-        : []
-    });
-    navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+    mediaAlbumRef.current = displayedPlayerAlbum || null;
+    mediaEpisodeRef.current = displayedPlayerEpisode;
+    updateMediaMetadata(displayedPlayerAlbum, displayedPlayerEpisode);
+    setMediaPlaybackState(isPlaying ? 'playing' : displayedPlayerEpisode ? 'paused' : 'none');
+    updateMediaPositionState();
+  }, [displayedPlayerAlbum, displayedPlayerEpisode, isPlaying, audioTime, audioDuration]);
+
+  useEffect(() => {
+    if (!mediaSession()) return undefined;
     setMediaAction('play', () => {
-      void playAlbum(displayedPlayerAlbum, displayedPlayerEpisode);
+      const audio = audioRef.current;
+      const album = mediaAlbumRef.current;
+      const episode = mediaEpisodeRef.current;
+      if (audio?.src) {
+        audio.play().catch(() => setMediaPlaybackState('paused'));
+        return;
+      }
+      if (album) void playAlbumRef.current?.(album, episode || undefined);
     });
     setMediaAction('pause', () => {
       const audio = audioRef.current;
       if (audio) audio.pause();
       setIsPlaying(false);
+      setMediaPlaybackState('paused');
     });
     setMediaAction('seekbackward', (details) => {
-      seekAudio(Math.max(0, (audioRef.current?.currentTime || displayedTime) - (details.seekOffset || 15)));
+      const audio = audioRef.current;
+      const baseTime = audio?.currentTime || 0;
+      seekAudioElement(baseTime - (details.seekOffset || 15));
+      void savePlaybackProgress(true);
     });
     setMediaAction('seekforward', (details) => {
-      seekAudio((audioRef.current?.currentTime || displayedTime) + (details.seekOffset || 15));
+      const audio = audioRef.current;
+      const baseTime = audio?.currentTime || 0;
+      seekAudioElement(baseTime + (details.seekOffset || 30));
+      void savePlaybackProgress(true);
+    });
+    setMediaAction('seekto', (details) => {
+      if (typeof details.seekTime !== 'number') return;
+      seekAudioElement(details.seekTime);
+      void savePlaybackProgress(true);
+    });
+    setMediaAction('previoustrack', () => {
+      playAdjacentEpisode(-1);
+    });
+    setMediaAction('nexttrack', () => {
+      playAdjacentEpisode(1);
     });
     return () => {
       setMediaAction('play', null);
       setMediaAction('pause', null);
       setMediaAction('seekbackward', null);
       setMediaAction('seekforward', null);
+      setMediaAction('seekto', null);
+      setMediaAction('previoustrack', null);
+      setMediaAction('nexttrack', null);
     };
-  }, [displayedPlayerAlbum, displayedPlayerEpisode, displayedTime, isPlaying]);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -854,6 +1003,30 @@ export function App() {
     } finally {
       setIsRefreshingCvAvatars(false);
     }
+  }
+
+  async function handleUpdateCvAvatar(name: string, file: File) {
+    if (!file.type.startsWith('image/')) {
+      setNotice('请选择图片文件');
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setNotice('CV 头像图片不能超过 5MB');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = async () => {
+      if (typeof reader.result !== 'string') return;
+      try {
+        const profile = await updateCvAvatar(name, reader.result);
+        setCvAvatars(profile.cvAvatars || {});
+        setNotice(`${name} 的头像已更新`);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : 'CV 头像保存失败');
+      }
+    };
+    reader.onerror = () => setNotice('图片读取失败');
+    reader.readAsDataURL(file);
   }
 
   async function handleAddCategory(name: string) {
@@ -1008,6 +1181,7 @@ export function App() {
               isRefreshingCvAvatars={isRefreshingCvAvatars}
               onToggleFavoriteCv={toggleFavoriteCv}
               onRefreshCvAvatars={handleRefreshCvAvatars}
+              onUpdateCvAvatar={handleUpdateCvAvatar}
               onPlay={playAlbum}
               selectedAlbum={selectedAlbum}
               currentAlbum={playerAlbum}
@@ -1118,17 +1292,34 @@ export function App() {
           playsInline
           onPause={() => {
             setIsPlaying(false);
+            setMediaPlaybackState('paused');
+            updateMediaPositionState();
             void savePlaybackProgress(true);
           }}
-          onPlay={() => setIsPlaying(true)}
+          onPlay={(event) => {
+            setIsPlaying(true);
+            setMediaPlaybackState('playing');
+            updateMediaPositionState(event.currentTarget);
+          }}
           onEnded={() => {
             setIsPlaying(false);
+            setMediaPlaybackState('paused');
+            updateMediaPositionState();
             void savePlaybackProgress(true, true);
           }}
-          onLoadedMetadata={(event) => setAudioDuration(event.currentTarget.duration || 0)}
-          onDurationChange={(event) => setAudioDuration(event.currentTarget.duration || 0)}
+          onLoadedMetadata={(event) => {
+            setAudioDuration(event.currentTarget.duration || 0);
+            updateMediaMetadata();
+            updateMediaPositionState(event.currentTarget);
+          }}
+          onDurationChange={(event) => {
+            setAudioDuration(event.currentTarget.duration || 0);
+            updateMediaPositionState(event.currentTarget);
+          }}
+          onSeeked={(event) => updateMediaPositionState(event.currentTarget)}
           onTimeUpdate={(event) => {
             setAudioTime(event.currentTarget.currentTime || 0);
+            updateMediaPositionState(event.currentTarget);
             void savePlaybackProgress();
           }}
         />
@@ -1172,6 +1363,7 @@ function HomeView({
   isRefreshingCvAvatars,
   onToggleFavoriteCv,
   onRefreshCvAvatars,
+  onUpdateCvAvatar,
   onPlay,
   selectedAlbum,
   currentAlbum,
@@ -1200,6 +1392,7 @@ function HomeView({
   isRefreshingCvAvatars: boolean;
   onToggleFavoriteCv: (cv: string) => void;
   onRefreshCvAvatars: (names: string[]) => Promise<void>;
+  onUpdateCvAvatar: (name: string, file: File) => Promise<void>;
   onPlay: (album: Album, episode?: Episode) => void;
   selectedAlbum: Album | null;
   currentAlbum: Album | null;
@@ -1307,6 +1500,7 @@ function HomeView({
           isRefreshing={isRefreshingCvAvatars}
           onToggleFavorite={onToggleFavoriteCv}
           onRefreshAvatars={onRefreshCvAvatars}
+          onUpdateAvatar={onUpdateCvAvatar}
           onOpenCv={onOpenCv}
         />
       ) : (
@@ -1363,6 +1557,7 @@ function CvWall({
   isRefreshing,
   onToggleFavorite,
   onRefreshAvatars,
+  onUpdateAvatar,
   onOpenCv
 }: {
   albums: Album[];
@@ -1373,6 +1568,7 @@ function CvWall({
   isRefreshing: boolean;
   onToggleFavorite: (cv: string) => void;
   onRefreshAvatars: (names: string[]) => Promise<void>;
+  onUpdateAvatar: (name: string, file: File) => Promise<void>;
   onOpenCv: (cv: string) => void;
 }) {
   const normalizedQuery = query.trim().toLowerCase();
@@ -1414,6 +1610,18 @@ function CvWall({
                   {isImageCover(avatar) ? null : profile.initial}
                 </span>
               </button>
+              <label className="cv-avatar-upload" aria-label={`更换 ${profile.name} 的头像`}>
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg,image/jpg,image/webp"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    event.target.value = '';
+                    if (file) void onUpdateAvatar(profile.name, file);
+                  }}
+                />
+                换
+              </label>
               <button className="cv-favorite-button" onClick={() => onToggleFavorite(profile.name)} aria-label={isFavorite ? `取消喜爱 ${profile.name}` : `喜爱 ${profile.name}`}>
                 <Heart size={13} fill={isFavorite ? 'currentColor' : 'none'} />
               </button>

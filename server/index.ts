@@ -48,7 +48,7 @@ const apiMetrics = {
 };
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '8mb' }));
 
 app.use((req, res, next) => {
   const startedAt = Date.now();
@@ -3102,6 +3102,23 @@ app.patch('/api/profile', (req, res) => {
 
   const state = readState();
   state.profile = { ...state.profile, avatar };
+  writeState(state);
+  res.json({ profile: state.profile });
+});
+
+app.patch('/api/cv-avatars', (req, res) => {
+  const name = stringField(req.body?.name, 80);
+  const avatar = String(req.body?.avatar || '').trim();
+  if (!name) return res.status(400).json({ error: 'CV name is required' });
+  if (avatar && !avatar.startsWith('data:image/')) {
+    return res.status(400).json({ error: 'CV avatar must be an image data URL' });
+  }
+
+  const state = readState();
+  const cvAvatars = { ...(state.profile.cvAvatars || {}) };
+  if (avatar) cvAvatars[name] = avatar;
+  else delete cvAvatars[name];
+  state.profile = { ...state.profile, cvAvatars };
   writeState(state);
   res.json({ profile: state.profile });
 });
