@@ -146,6 +146,25 @@ type LocalPlaybackProgress = {
   updatedAt: string;
 };
 
+type MediaDiagnosticSnapshot = {
+  mediaSession: string;
+  secureContext: string;
+  visibilityState: string;
+  userAgent: string;
+  audioExists: string;
+  audioPaused: string;
+  audioReadyState: string;
+  audioNetworkState: string;
+  audioCurrentSrc: string;
+  audioDuration: string;
+  audioCurrentTime: string;
+  reactIsPlaying: string;
+  mediaSessionPlaybackState: string;
+  lastPlayResult: string;
+  lastPlayError: string;
+  testRegistrationResult: string;
+};
+
 function kindLabel(kind: MediaKind) {
   return tabs.find((tab) => tab.kind === kind)?.label || '内容';
 }
@@ -480,10 +499,12 @@ export function App() {
   const [sleepTimerTargetAt, setSleepTimerTargetAt] = useState<number | null>(null);
   const [sleepTimerRemainingMs, setSleepTimerRemainingMs] = useState(0);
   const [sleepTimerLabel, setSleepTimerLabel] = useState('');
+  const [mediaDiagnostics, setMediaDiagnostics] = useState<MediaDiagnosticSnapshot | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const mediaAlbumRef = useRef<Album | null>(null);
   const mediaEpisodeRef = useRef<Episode | null | undefined>(null);
   const playAlbumRef = useRef<((album: Album, episode?: Episode) => Promise<void>) | null>(null);
+  const lastPlayResultRef = useRef({ result: 'unavailable', error: '' });
   const lastProgressSaveRef = useRef(0);
   const restoringProgressRef = useRef(false);
   const sleepTimerTimeoutRef = useRef<number | null>(null);
@@ -601,6 +622,116 @@ export function App() {
     }
   }
 
+  function mediaDiagnosticValue(value: unknown) {
+    if (value === undefined || value === null || value === '') return 'unavailable';
+    return String(value);
+  }
+
+  function collectMediaDiagnostics(testRegistrationResult = mediaDiagnostics?.testRegistrationResult || 'unavailable') {
+    const audio = audioRef.current;
+    const session = mediaSession();
+    setMediaDiagnostics({
+      mediaSession: mediaDiagnosticValue(Boolean(session)),
+      secureContext: mediaDiagnosticValue(window.isSecureContext),
+      visibilityState: mediaDiagnosticValue(document.visibilityState),
+      userAgent: mediaDiagnosticValue(navigator.userAgent),
+      audioExists: mediaDiagnosticValue(Boolean(audio)),
+      audioPaused: audio ? mediaDiagnosticValue(audio.paused) : 'unavailable',
+      audioReadyState: audio ? mediaDiagnosticValue(audio.readyState) : 'unavailable',
+      audioNetworkState: audio ? mediaDiagnosticValue(audio.networkState) : 'unavailable',
+      audioCurrentSrc: audio ? mediaDiagnosticValue(audio.currentSrc || audio.src) : 'unavailable',
+      audioDuration: audio && Number.isFinite(audio.duration) ? mediaDiagnosticValue(audio.duration) : 'unavailable',
+      audioCurrentTime: audio && Number.isFinite(audio.currentTime) ? mediaDiagnosticValue(audio.currentTime) : 'unavailable',
+      reactIsPlaying: mediaDiagnosticValue(isPlaying),
+      mediaSessionPlaybackState: session ? mediaDiagnosticValue(session.playbackState) : 'unavailable',
+      lastPlayResult: lastPlayResultRef.current.result,
+      lastPlayError: lastPlayResultRef.current.error || 'unavailable',
+      testRegistrationResult
+    });
+  }
+
+  function registerMediaSessionActions() {
+    if (!mediaSession()) return undefined;
+    setMediaAction('play', () => {
+      const audio = audioRef.current;
+      const album = mediaAlbumRef.current;
+      const episode = mediaEpisodeRef.current;
+      if (audio?.src) {
+        audio
+          .play()
+          .then(() => {
+            lastPlayResultRef.current = { result: 'success', error: '' };
+            collectMediaDiagnostics();
+          })
+          .catch((error) => {
+            lastPlayResultRef.current = { result: 'failed', error: error instanceof Error ? error.message : String(error) };
+            setMediaPlaybackState('paused');
+            collectMediaDiagnostics();
+          });
+        return;
+      }
+      if (album) void playAlbumRef.current?.(album, episode || undefined);
+    });
+    setMediaAction('pause', () => {
+      const audio = audioRef.current;
+      if (audio) audio.pause();
+      setIsPlaying(false);
+      setMediaPlaybackState('paused');
+      collectMediaDiagnostics();
+    });
+    setMediaAction('seekbackward', (details) => {
+      const audio = audioRef.current;
+      const baseTime = audio?.currentTime || 0;
+      seekAudioElement(baseTime - (details.seekOffset || 15));
+      void savePlaybackProgress(true);
+      collectMediaDiagnostics();
+    });
+    setMediaAction('seekforward', (details) => {
+      const audio = audioRef.current;
+      const baseTime = audio?.currentTime || 0;
+      seekAudioElement(baseTime + (details.seekOffset || 30));
+      void savePlaybackProgress(true);
+      collectMediaDiagnostics();
+    });
+    setMediaAction('seekto', (details) => {
+      if (typeof details.seekTime !== 'number') return;
+      seekAudioElement(details.seekTime);
+      void savePlaybackProgress(true);
+      collectMediaDiagnostics();
+    });
+    setMediaAction('previoustrack', () => {
+      playAdjacentEpisode(-1);
+      collectMediaDiagnostics();
+    });
+    setMediaAction('nexttrack', () => {
+      playAdjacentEpisode(1);
+      collectMediaDiagnostics();
+    });
+    return () => {
+      setMediaAction('play', null);
+      setMediaAction('pause', null);
+      setMediaAction('seekbackward', null);
+      setMediaAction('seekforward', null);
+      setMediaAction('seekto', null);
+      setMediaAction('previoustrack', null);
+      setMediaAction('nexttrack', null);
+    };
+  }
+
+  function testMediaSessionRegistration() {
+    const audio = audioRef.current;
+    if (!audio?.src && !audio?.currentSrc) {
+      collectMediaDiagnostics('failed: no current audio source');
+      setNotice('当前还没有播放源，请先点一次播放');
+      return;
+    }
+    updateMediaMetadata();
+    const registered = Boolean(registerMediaSessionActions());
+    updateMediaPositionState(audio);
+    setMediaPlaybackState(audio.paused ? 'paused' : 'playing');
+    collectMediaDiagnostics(registered ? 'success' : 'failed: mediaSession unavailable');
+  }
+
   function seekAudioElement(nextTime: number) {
     const audio = audioRef.current;
     if (!audio || !Number.isFinite(nextTime)) return;
@@ -704,13 +835,16 @@ export function App() {
     }
     try {
       await audio.play();
+      lastPlayResultRef.current = { result: 'success', error: '' };
       setIsPlaying(true);
       setMediaPlaybackState('playing');
       updateMediaPositionState(audio);
-    } catch {
+    } catch (error) {
+      lastPlayResultRef.current = { result: 'failed', error: error instanceof Error ? error.message : String(error) };
       setNotice('浏览器拦截了自动播放，请再点一次播放按钮');
       setIsPlaying(false);
       setMediaPlaybackState('paused');
+      collectMediaDiagnostics();
     }
   }
 
@@ -875,57 +1009,7 @@ export function App() {
     updateMediaPositionState();
   }, [displayedPlayerAlbum, displayedPlayerEpisode, isPlaying, audioTime, audioDuration]);
 
-  useEffect(() => {
-    if (!mediaSession()) return undefined;
-    setMediaAction('play', () => {
-      const audio = audioRef.current;
-      const album = mediaAlbumRef.current;
-      const episode = mediaEpisodeRef.current;
-      if (audio?.src) {
-        audio.play().catch(() => setMediaPlaybackState('paused'));
-        return;
-      }
-      if (album) void playAlbumRef.current?.(album, episode || undefined);
-    });
-    setMediaAction('pause', () => {
-      const audio = audioRef.current;
-      if (audio) audio.pause();
-      setIsPlaying(false);
-      setMediaPlaybackState('paused');
-    });
-    setMediaAction('seekbackward', (details) => {
-      const audio = audioRef.current;
-      const baseTime = audio?.currentTime || 0;
-      seekAudioElement(baseTime - (details.seekOffset || 15));
-      void savePlaybackProgress(true);
-    });
-    setMediaAction('seekforward', (details) => {
-      const audio = audioRef.current;
-      const baseTime = audio?.currentTime || 0;
-      seekAudioElement(baseTime + (details.seekOffset || 30));
-      void savePlaybackProgress(true);
-    });
-    setMediaAction('seekto', (details) => {
-      if (typeof details.seekTime !== 'number') return;
-      seekAudioElement(details.seekTime);
-      void savePlaybackProgress(true);
-    });
-    setMediaAction('previoustrack', () => {
-      playAdjacentEpisode(-1);
-    });
-    setMediaAction('nexttrack', () => {
-      playAdjacentEpisode(1);
-    });
-    return () => {
-      setMediaAction('play', null);
-      setMediaAction('pause', null);
-      setMediaAction('seekbackward', null);
-      setMediaAction('seekforward', null);
-      setMediaAction('seekto', null);
-      setMediaAction('previoustrack', null);
-      setMediaAction('nexttrack', null);
-    };
-  }, []);
+  useEffect(() => registerMediaSessionActions(), []);
 
   useEffect(() => {
     return () => {
@@ -1230,6 +1314,9 @@ export function App() {
               onScheduleSleepTimerMinutes={scheduleSleepTimerAfterMinutes}
               onScheduleSleepTimerClock={scheduleSleepTimerAtClock}
               onCancelSleepTimer={clearSleepTimer}
+              mediaDiagnostics={mediaDiagnostics}
+              onRefreshMediaDiagnostics={() => collectMediaDiagnostics()}
+              onTestMediaSessionRegistration={testMediaSessionRegistration}
             />
           ) : null}
         </section>
@@ -2223,7 +2310,10 @@ function MeView({
   sleepTimerLabel,
   onScheduleSleepTimerMinutes,
   onScheduleSleepTimerClock,
-  onCancelSleepTimer
+  onCancelSleepTimer,
+  mediaDiagnostics,
+  onRefreshMediaDiagnostics,
+  onTestMediaSessionRegistration
 }: {
   nas: NasConfig | null;
   albums: Album[];
@@ -2245,6 +2335,9 @@ function MeView({
   onScheduleSleepTimerMinutes: (minutes: number) => void;
   onScheduleSleepTimerClock: (value: string) => void;
   onCancelSleepTimer: (showNotice?: boolean) => void;
+  mediaDiagnostics: MediaDiagnosticSnapshot | null;
+  onRefreshMediaDiagnostics: () => void;
+  onTestMediaSessionRegistration: () => void;
 }) {
   const [categoryName, setCategoryName] = useState('');
   const [avatar, setAvatar] = useState('');
@@ -2268,6 +2361,7 @@ function MeView({
   const [coverImportResult, setCoverImportResult] = useState<CoverImportResult | null>(null);
   const [isExportingCvTodo, setIsExportingCvTodo] = useState(false);
   const [isSleepTimerOpen, setIsSleepTimerOpen] = useState(false);
+  const [isMediaDiagnosticsOpen, setIsMediaDiagnosticsOpen] = useState(false);
   const [sleepMinutes, setSleepMinutes] = useState('30');
   const [sleepClock, setSleepClock] = useState('24:00');
   const isAnalyzingLibrary = metadataAnalyzeJob?.status === 'queued' || metadataAnalyzeJob?.status === 'running';
@@ -2527,6 +2621,24 @@ function MeView({
       value.toLowerCase().includes(q)
     );
   });
+  const mediaDiagnosticRows: Array<[keyof MediaDiagnosticSnapshot, string]> = [
+    ['mediaSession', 'navigator.mediaSession'],
+    ['secureContext', 'window.isSecureContext'],
+    ['visibilityState', 'document.visibilityState'],
+    ['userAgent', 'userAgent'],
+    ['audioExists', 'audio 存在'],
+    ['audioPaused', 'audio.paused'],
+    ['audioReadyState', 'audio.readyState'],
+    ['audioNetworkState', 'audio.networkState'],
+    ['audioCurrentSrc', 'audio.currentSrc'],
+    ['audioDuration', 'audio.duration'],
+    ['audioCurrentTime', 'audio.currentTime'],
+    ['reactIsPlaying', 'React isPlaying'],
+    ['mediaSessionPlaybackState', 'mediaSession.playbackState'],
+    ['lastPlayResult', '最近 play 结果'],
+    ['lastPlayError', '最近 play 错误'],
+    ['testRegistrationResult', '测试注册结果']
+  ];
   return (
     <section className="me-page">
       <div className="me-top-actions">
@@ -2576,6 +2688,34 @@ function MeView({
           </button>
         </div>
         <p>{nas?.connected ? `已连接：${nas.root}` : '把广播剧目录挂载到容器后，在这里保存路径并扫描。'}</p>
+      </div>
+
+      <div className="settings-card media-diagnostics-card">
+        <button className="media-diagnostics-toggle" onClick={() => setIsMediaDiagnosticsOpen((value) => !value)}>
+          <span>
+            <strong>移动端媒体诊断</strong>
+            <small>检查 Media Session、audio 状态和系统媒体注册</small>
+          </span>
+          <ChevronDown size={18} className={isMediaDiagnosticsOpen ? 'open' : ''} />
+        </button>
+        {isMediaDiagnosticsOpen ? (
+          <div className="media-diagnostics-body">
+            <div className="button-row">
+              <button onClick={onRefreshMediaDiagnostics}>刷新诊断信息</button>
+              <button className="filled" onClick={onTestMediaSessionRegistration}>
+                测试系统媒体注册
+              </button>
+            </div>
+            <dl className="media-diagnostics-grid">
+              {mediaDiagnosticRows.map(([key, label]) => (
+                <div key={key}>
+                  <dt>{label}</dt>
+                  <dd>{mediaDiagnostics?.[key] || 'unavailable'}</dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        ) : null}
       </div>
 
       <div className="settings-card metadata-transfer-card">

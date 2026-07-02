@@ -1791,12 +1791,14 @@ function audioContentType(filePath: string) {
   const lower = filePath.toLowerCase();
   const ext = path.extname(lower);
   if (ext === '.mp3') return 'audio/mpeg';
-  if (ext === '.m4a' || ext === '.m4b' || ext === '.aac') return 'audio/mp4';
+  if (ext === '.m4a' || ext === '.m4b') return 'audio/mp4';
+  if (ext === '.aac') return 'audio/aac';
   if (ext === '.flac') return 'audio/flac';
   if (ext === '.wav') return 'audio/wav';
   if (ext === '.ogg' || ext === '.opus') return 'audio/ogg';
   if (lower.endsWith('mp3')) return 'audio/mpeg';
-  if (lower.endsWith('m4a') || lower.endsWith('m4b') || lower.endsWith('aac')) return 'audio/mp4';
+  if (lower.endsWith('m4a') || lower.endsWith('m4b')) return 'audio/mp4';
+  if (lower.endsWith('aac')) return 'audio/aac';
   if (lower.endsWith('flac')) return 'audio/flac';
   if (lower.endsWith('wav')) return 'audio/wav';
   if (lower.endsWith('ogg') || lower.endsWith('opus')) return 'audio/ogg';
