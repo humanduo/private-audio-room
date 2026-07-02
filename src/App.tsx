@@ -163,6 +163,28 @@ type MediaDiagnosticSnapshot = {
   lastPlayResult: string;
   lastPlayError: string;
   testRegistrationResult: string;
+  playbackNeedsUserGesture: string;
+};
+
+type AudioEventLogEntry = {
+  time: string;
+  event: string;
+  currentTime: number;
+  duration: number;
+  paused: boolean;
+  readyState: number;
+  networkState: number;
+  currentSrc: string;
+  error: string;
+};
+
+type LastKnownPlayback = {
+  albumId: string;
+  episodeId: string;
+  src: string;
+  currentTime: number;
+  duration: number;
+  timestamp: number;
 };
 
 function kindLabel(kind: MediaKind) {
@@ -173,6 +195,11 @@ function coverBackground(cover?: string) {
   if (!cover) return 'linear-gradient(145deg, #fff6f2, #ffe4e5)';
   if (cover.startsWith('linear-gradient(') || cover.startsWith('radial-gradient(')) return cover;
   return `url(${JSON.stringify(cover)})`;
+}
+
+function coverImageSrc(cover?: string) {
+  if (!cover || cover.includes('gradient(')) return '';
+  return cover;
 }
 
 function mediaArtworkUrl(cover?: string) {
@@ -500,11 +527,18 @@ export function App() {
   const [sleepTimerRemainingMs, setSleepTimerRemainingMs] = useState(0);
   const [sleepTimerLabel, setSleepTimerLabel] = useState('');
   const [mediaDiagnostics, setMediaDiagnostics] = useState<MediaDiagnosticSnapshot | null>(null);
+  const [audioEventLogs, setAudioEventLogs] = useState<AudioEventLogEntry[]>([]);
+  const [playbackNeedsUserGesture, setPlaybackNeedsUserGesture] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const mediaAlbumRef = useRef<Album | null>(null);
   const mediaEpisodeRef = useRef<Episode | null | undefined>(null);
   const playAlbumRef = useRef<((album: Album, episode?: Episode) => Promise<void>) | null>(null);
   const lastPlayResultRef = useRef({ result: 'unavailable', error: '' });
+  const lastKnownPlaybackRef = useRef<LastKnownPlayback | null>(null);
+  const recoveryAttemptRef = useRef<{ src: string; at: number; reason: string } | null>(null);
+  const stallRecoveryTimeoutRef = useRef<number | null>(null);
+  const isPlayingRef = useRef(false);
+  const expectedPlayingRef = useRef(false);
   const lastProgressSaveRef = useRef(0);
   const restoringProgressRef = useRef(false);
   const sleepTimerTimeoutRef = useRef<number | null>(null);
@@ -627,6 +661,44 @@ export function App() {
     return String(value);
   }
 
+  function audioErrorText(audio = audioRef.current) {
+    const error = audio?.error;
+    if (!error) return '';
+    const message = 'message' in error && typeof error.message === 'string' ? error.message : '';
+    return `code=${error.code}${message ? ` message=${message}` : ''}`;
+  }
+
+  function pushAudioEventLog(event: string, audio = audioRef.current) {
+    const entry: AudioEventLogEntry = {
+      time: new Date().toLocaleTimeString(),
+      event,
+      currentTime: audio && Number.isFinite(audio.currentTime) ? Number(audio.currentTime.toFixed(2)) : 0,
+      duration: audio && Number.isFinite(audio.duration) ? Number(audio.duration.toFixed(2)) : 0,
+      paused: audio ? audio.paused : true,
+      readyState: audio?.readyState ?? -1,
+      networkState: audio?.networkState ?? -1,
+      currentSrc: audio?.currentSrc || audio?.src || '',
+      error: audioErrorText(audio)
+    };
+    setAudioEventLogs((current) => [entry, ...current].slice(0, 30));
+  }
+
+  function recordLastKnownPlayback(reason: string, audio = audioRef.current) {
+    const album = mediaAlbumRef.current || playerAlbum;
+    const episode = mediaEpisodeRef.current || playerEpisode;
+    const src = audio?.currentSrc || audio?.src || '';
+    if (!album || !episode || !src) return;
+    lastKnownPlaybackRef.current = {
+      albumId: album.id,
+      episodeId: episode.id,
+      src,
+      currentTime: audio && Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
+      duration: audio && Number.isFinite(audio.duration) ? audio.duration : 0,
+      timestamp: Date.now()
+    };
+    console.log('[player] last known playback saved', { reason, ...lastKnownPlaybackRef.current });
+  }
+
   function collectMediaDiagnostics(testRegistrationResult = mediaDiagnostics?.testRegistrationResult || 'unavailable') {
     const audio = audioRef.current;
     const session = mediaSession();
@@ -646,8 +718,96 @@ export function App() {
       mediaSessionPlaybackState: session ? mediaDiagnosticValue(session.playbackState) : 'unavailable',
       lastPlayResult: lastPlayResultRef.current.result,
       lastPlayError: lastPlayResultRef.current.error || 'unavailable',
-      testRegistrationResult
+      testRegistrationResult,
+      playbackNeedsUserGesture: mediaDiagnosticValue(playbackNeedsUserGesture)
     });
+  }
+
+  function waitForAudioReady(audio: HTMLAudioElement, timeoutMs = 6000) {
+    if (audio.readyState >= 2) return Promise.resolve(true);
+    return new Promise<boolean>((resolve) => {
+      let done = false;
+      const finish = (ok: boolean) => {
+        if (done) return;
+        done = true;
+        window.clearTimeout(timeout);
+        audio.removeEventListener('loadedmetadata', onReady);
+        audio.removeEventListener('canplay', onReady);
+        audio.removeEventListener('error', onError);
+        resolve(ok);
+      };
+      const onReady = () => finish(true);
+      const onError = () => finish(false);
+      const timeout = window.setTimeout(() => finish(audio.readyState >= 2), timeoutMs);
+      audio.addEventListener('loadedmetadata', onReady, { once: true });
+      audio.addEventListener('canplay', onReady, { once: true });
+      audio.addEventListener('error', onError, { once: true });
+    });
+  }
+
+  async function restoreLastKnownPlaybackIfNeeded(reason: string) {
+    const audio = audioRef.current;
+    const last = lastKnownPlaybackRef.current;
+    if (!audio || !last?.src) return false;
+    const currentSrc = audio.currentSrc || audio.src;
+    const needsReload = !currentSrc || audio.readyState < 2 || audio.networkState === HTMLMediaElement.NETWORK_NO_SOURCE;
+    if (!needsReload) return false;
+    const previousAttempt = recoveryAttemptRef.current;
+    if (previousAttempt?.src === last.src && Date.now() - previousAttempt.at < 30000) return false;
+
+    recoveryAttemptRef.current = { src: last.src, at: Date.now(), reason };
+    pushAudioEventLog(`recover:${reason}`, audio);
+    restoringProgressRef.current = true;
+    if (currentSrc !== last.src) audio.src = last.src;
+    audio.load();
+    const ready = await waitForAudioReady(audio);
+    const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : last.duration;
+    if (ready && last.currentTime > 0 && (!duration || last.currentTime < duration - 1)) {
+      audio.currentTime = Math.max(0, Math.min(last.currentTime, duration ? duration - 1 : last.currentTime));
+      setAudioTime(audio.currentTime);
+    }
+    if (duration > 0) setAudioDuration(duration);
+    restoringProgressRef.current = false;
+    updateMediaPositionState(audio);
+    return ready;
+  }
+
+  async function safePlayAudio(reason: string, options: { allowRecovery?: boolean } = {}) {
+    const audio = audioRef.current;
+    if (!audio) {
+      lastPlayResultRef.current = { result: 'failed', error: 'audio unavailable' };
+      setIsPlaying(false);
+      expectedPlayingRef.current = false;
+      setMediaPlaybackState('paused');
+      setPlaybackNeedsUserGesture(true);
+      collectMediaDiagnostics();
+      return false;
+    }
+    if (options.allowRecovery !== false) await restoreLastKnownPlaybackIfNeeded(reason);
+    try {
+      await audio.play();
+      lastPlayResultRef.current = { result: 'success', error: '' };
+      setPlaybackNeedsUserGesture(false);
+      setIsPlaying(true);
+      isPlayingRef.current = true;
+      expectedPlayingRef.current = true;
+      setMediaPlaybackState('playing');
+      updateMediaPositionState(audio);
+      collectMediaDiagnostics();
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      lastPlayResultRef.current = { result: 'failed', error: message };
+      setPlaybackNeedsUserGesture(true);
+      setIsPlaying(false);
+      isPlayingRef.current = false;
+      expectedPlayingRef.current = false;
+      setMediaPlaybackState('paused');
+      setNotice('播放被浏览器暂停，点击恢复播放');
+      pushAudioEventLog(`play-failed:${reason}`, audio);
+      collectMediaDiagnostics();
+      return false;
+    }
   }
 
   function registerMediaSessionActions() {
@@ -657,25 +817,18 @@ export function App() {
       const album = mediaAlbumRef.current;
       const episode = mediaEpisodeRef.current;
       if (audio?.src) {
-        audio
-          .play()
-          .then(() => {
-            lastPlayResultRef.current = { result: 'success', error: '' };
-            collectMediaDiagnostics();
-          })
-          .catch((error) => {
-            lastPlayResultRef.current = { result: 'failed', error: error instanceof Error ? error.message : String(error) };
-            setMediaPlaybackState('paused');
-            collectMediaDiagnostics();
-          });
+        void safePlayAudio('media-session-play');
         return;
       }
       if (album) void playAlbumRef.current?.(album, episode || undefined);
     });
     setMediaAction('pause', () => {
       const audio = audioRef.current;
+      recordLastKnownPlayback('media-session-pause', audio);
       if (audio) audio.pause();
       setIsPlaying(false);
+      isPlayingRef.current = false;
+      expectedPlayingRef.current = false;
       setMediaPlaybackState('paused');
       collectMediaDiagnostics();
     });
@@ -833,19 +986,8 @@ export function App() {
         });
       }, { once: true });
     }
-    try {
-      await audio.play();
-      lastPlayResultRef.current = { result: 'success', error: '' };
-      setIsPlaying(true);
-      setMediaPlaybackState('playing');
-      updateMediaPositionState(audio);
-    } catch (error) {
-      lastPlayResultRef.current = { result: 'failed', error: error instanceof Error ? error.message : String(error) };
-      setNotice('浏览器拦截了自动播放，请再点一次播放按钮');
-      setIsPlaying(false);
-      setMediaPlaybackState('paused');
-      collectMediaDiagnostics();
-    }
+    recordLastKnownPlayback('play-album', audio);
+    await safePlayAudio('play-album', { allowRecovery: false });
   }
 
   playAlbumRef.current = playAlbum;
@@ -859,8 +1001,11 @@ export function App() {
     }
 
     if (isPlaying) {
+      recordLastKnownPlayback('toggle-pause', audio);
       audio.pause();
       setIsPlaying(false);
+      isPlayingRef.current = false;
+      expectedPlayingRef.current = false;
       setMediaPlaybackState('paused');
       return;
     }
@@ -894,8 +1039,11 @@ export function App() {
     setSleepTimerLabel(label);
     sleepTimerTimeoutRef.current = window.setTimeout(() => {
       const audio = audioRef.current;
+      recordLastKnownPlayback('sleep-timer', audio);
       if (audio) audio.pause();
       setIsPlaying(false);
+      isPlayingRef.current = false;
+      expectedPlayingRef.current = false;
       setSleepTimerTargetAt(null);
       setSleepTimerRemainingMs(0);
       setSleepTimerLabel('');
@@ -976,22 +1124,120 @@ export function App() {
     void savePlaybackProgress(true);
   }
 
+  function clearStallRecoveryTimer() {
+    if (stallRecoveryTimeoutRef.current) {
+      window.clearTimeout(stallRecoveryTimeoutRef.current);
+      stallRecoveryTimeoutRef.current = null;
+    }
+  }
+
+  function scheduleStallRecovery(event: string, audio = audioRef.current) {
+    if (!audio) return;
+    clearStallRecoveryTimer();
+    const src = audio.currentSrc || audio.src;
+    const savedTime = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+    const shouldResume = expectedPlayingRef.current || isPlayingRef.current || !audio.paused;
+    stallRecoveryTimeoutRef.current = window.setTimeout(async () => {
+      const currentAudio = audioRef.current;
+      if (!currentAudio || (currentAudio.currentSrc || currentAudio.src) !== src) return;
+      if (currentAudio.readyState >= 3 || !currentAudio.paused) return;
+      const previousAttempt = recoveryAttemptRef.current;
+      if (previousAttempt?.src === src && Date.now() - previousAttempt.at < 30000) return;
+      recoveryAttemptRef.current = { src, at: Date.now(), reason: event };
+      pushAudioEventLog(`stall-recover:${event}`, currentAudio);
+      restoringProgressRef.current = true;
+      currentAudio.load();
+      const ready = await waitForAudioReady(currentAudio);
+      if (ready && savedTime > 0 && Number.isFinite(currentAudio.duration) && savedTime < currentAudio.duration - 1) {
+        currentAudio.currentTime = savedTime;
+        setAudioTime(currentAudio.currentTime);
+      }
+      restoringProgressRef.current = false;
+      if (shouldResume) await safePlayAudio(`stall-recover:${event}`, { allowRecovery: false });
+      else collectMediaDiagnostics();
+    }, 8000);
+  }
+
+  function handleAudioEvent(event: string, audio = audioRef.current) {
+    pushAudioEventLog(event, audio);
+    if (event === 'play' || event === 'playing') {
+      clearStallRecoveryTimer();
+      expectedPlayingRef.current = true;
+      setPlaybackNeedsUserGesture(false);
+    }
+    if (event === 'canplay' || event === 'canplaythrough') clearStallRecoveryTimer();
+    if (event === 'waiting' || event === 'stalled') scheduleStallRecovery(event, audio);
+    if (event === 'pause') {
+      clearStallRecoveryTimer();
+      recordLastKnownPlayback('audio-pause', audio);
+      expectedPlayingRef.current = false;
+    }
+    if (event === 'ended') {
+      recordLastKnownPlayback('audio-ended', audio);
+      expectedPlayingRef.current = false;
+      setPlaybackNeedsUserGesture(false);
+    }
+    if (event === 'error') {
+      lastPlayResultRef.current = { result: 'failed', error: audioErrorText(audio) || 'audio error' };
+      setPlaybackNeedsUserGesture(true);
+      collectMediaDiagnostics();
+    }
+  }
+
   useEffect(() => {
     function flushPlaybackProgress() {
       void savePlaybackProgress(true);
     }
 
     function handleVisibilityChange() {
-      if (document.visibilityState === 'hidden') flushPlaybackProgress();
+      pushAudioEventLog('visibilitychange', audioRef.current);
+      if (document.visibilityState === 'hidden') {
+        recordLastKnownPlayback('visibility-hidden', audioRef.current);
+        flushPlaybackProgress();
+        return;
+      }
+      const audio = audioRef.current;
+      if (isPlayingRef.current && audio?.paused) {
+        setPlaybackNeedsUserGesture(true);
+        setNotice('播放被浏览器暂停，点击恢复播放');
+      } else if (audio && !audio.paused) {
+        setIsPlaying(true);
+        setMediaPlaybackState('playing');
+      }
+      collectMediaDiagnostics();
+    }
+
+    function handlePageHide() {
+      pushAudioEventLog('pagehide', audioRef.current);
+      recordLastKnownPlayback('pagehide', audioRef.current);
+      flushPlaybackProgress();
+    }
+
+    function handlePageShow() {
+      pushAudioEventLog('pageshow', audioRef.current);
+      const audio = audioRef.current;
+      if (isPlayingRef.current && audio?.paused) {
+        setPlaybackNeedsUserGesture(true);
+        setNotice('播放被浏览器暂停，点击恢复播放');
+      }
+      collectMediaDiagnostics();
     }
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('pageshow', handlePageShow);
     window.addEventListener('beforeunload', flushPlaybackProgress);
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('pageshow', handlePageShow);
       window.removeEventListener('beforeunload', flushPlaybackProgress);
     };
   });
+
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
 
   useEffect(() => {
     if (!sleepTimerTargetAt) return undefined;
@@ -1014,6 +1260,7 @@ export function App() {
   useEffect(() => {
     return () => {
       if (sleepTimerTimeoutRef.current) window.clearTimeout(sleepTimerTimeoutRef.current);
+      clearStallRecoveryTimer();
     };
   }, []);
 
@@ -1315,6 +1562,7 @@ export function App() {
               onScheduleSleepTimerClock={scheduleSleepTimerAtClock}
               onCancelSleepTimer={clearSleepTimer}
               mediaDiagnostics={mediaDiagnostics}
+              audioEventLogs={audioEventLogs}
               onRefreshMediaDiagnostics={() => collectMediaDiagnostics()}
               onTestMediaSessionRegistration={testMediaSessionRegistration}
             />
@@ -1351,6 +1599,12 @@ export function App() {
           />
         ) : null}
 
+        {playbackNeedsUserGesture ? (
+          <button className="playback-resume-banner" onClick={() => void safePlayAudio('user-gesture-resume')}>
+            播放被浏览器暂停，点击恢复播放
+          </button>
+        ) : null}
+
         <nav className="bottom-nav" aria-label="底部导航">
           <BottomNavButton item={navItems[0]} view={view} setView={setView} />
           <BottomNavButton item={navItems[1]} view={view} setView={setView} />
@@ -1378,32 +1632,53 @@ export function App() {
           preload="auto"
           playsInline
           onPause={() => {
+            handleAudioEvent('pause');
             setIsPlaying(false);
+            isPlayingRef.current = false;
             setMediaPlaybackState('paused');
             updateMediaPositionState();
             void savePlaybackProgress(true);
           }}
           onPlay={(event) => {
+            handleAudioEvent('play', event.currentTarget);
             setIsPlaying(true);
+            isPlayingRef.current = true;
             setMediaPlaybackState('playing');
             updateMediaPositionState(event.currentTarget);
           }}
+          onPlaying={(event) => handleAudioEvent('playing', event.currentTarget)}
           onEnded={() => {
+            handleAudioEvent('ended');
             setIsPlaying(false);
+            isPlayingRef.current = false;
             setMediaPlaybackState('paused');
             updateMediaPositionState();
             void savePlaybackProgress(true, true);
           }}
           onLoadedMetadata={(event) => {
+            handleAudioEvent('loadedmetadata', event.currentTarget);
             setAudioDuration(event.currentTarget.duration || 0);
             updateMediaMetadata();
             updateMediaPositionState(event.currentTarget);
           }}
+          onLoadStart={(event) => handleAudioEvent('loadstart', event.currentTarget)}
+          onCanPlay={(event) => handleAudioEvent('canplay', event.currentTarget)}
+          onCanPlayThrough={(event) => handleAudioEvent('canplaythrough', event.currentTarget)}
           onDurationChange={(event) => {
             setAudioDuration(event.currentTarget.duration || 0);
             updateMediaPositionState(event.currentTarget);
           }}
-          onSeeked={(event) => updateMediaPositionState(event.currentTarget)}
+          onWaiting={(event) => handleAudioEvent('waiting', event.currentTarget)}
+          onStalled={(event) => handleAudioEvent('stalled', event.currentTarget)}
+          onSuspend={(event) => handleAudioEvent('suspend', event.currentTarget)}
+          onError={(event) => handleAudioEvent('error', event.currentTarget)}
+          onEmptied={(event) => handleAudioEvent('emptied', event.currentTarget)}
+          onAbort={(event) => handleAudioEvent('abort', event.currentTarget)}
+          onSeeking={(event) => handleAudioEvent('seeking', event.currentTarget)}
+          onSeeked={(event) => {
+            handleAudioEvent('seeked', event.currentTarget);
+            updateMediaPositionState(event.currentTarget);
+          }}
           onTimeUpdate={(event) => {
             setAudioTime(event.currentTarget.currentTime || 0);
             updateMediaPositionState(event.currentTarget);
@@ -1743,11 +2018,14 @@ function DramaListRow({
   const episodePrefix = String(lastIndex).padStart(2, '0');
   const seasonLine = [displayTitle.season, `共 ${album.episodes.length} 集`].filter(Boolean).join(' · ');
   const progressLine = hasPlaybackProgress ? `已播放 第 ${episodePrefix} 集` : '尚未播放';
+  const coverSrc = coverImageSrc(album.cover);
 
   return (
     <article className="drama-row">
       <button className="drama-row-main" onClick={() => onOpen(album)}>
-        <span className="drama-row-cover" style={{ background: coverBackground(album.cover) }} />
+        <span className="drama-row-cover" style={coverSrc ? undefined : { background: coverBackground(album.cover) }}>
+          {coverSrc ? <img src={coverSrc} alt="" loading="lazy" decoding="async" /> : null}
+        </span>
         <span className="drama-row-copy">
           <strong>{displayTitle.title}</strong>
           <small className="drama-row-meta">{seasonLine || album.subtitle}</small>
@@ -2312,6 +2590,7 @@ function MeView({
   onScheduleSleepTimerClock,
   onCancelSleepTimer,
   mediaDiagnostics,
+  audioEventLogs,
   onRefreshMediaDiagnostics,
   onTestMediaSessionRegistration
 }: {
@@ -2336,6 +2615,7 @@ function MeView({
   onScheduleSleepTimerClock: (value: string) => void;
   onCancelSleepTimer: (showNotice?: boolean) => void;
   mediaDiagnostics: MediaDiagnosticSnapshot | null;
+  audioEventLogs: AudioEventLogEntry[];
   onRefreshMediaDiagnostics: () => void;
   onTestMediaSessionRegistration: () => void;
 }) {
@@ -2637,7 +2917,8 @@ function MeView({
     ['mediaSessionPlaybackState', 'mediaSession.playbackState'],
     ['lastPlayResult', '最近 play 结果'],
     ['lastPlayError', '最近 play 错误'],
-    ['testRegistrationResult', '测试注册结果']
+    ['testRegistrationResult', '测试注册结果'],
+    ['playbackNeedsUserGesture', '需要手势恢复']
   ];
   return (
     <section className="me-page">
@@ -2654,7 +2935,7 @@ function MeView({
         <div className="me-profile-main">
           <label className={avatar ? 'me-avatar has-image' : 'me-avatar'} aria-label="更换头像">
             <input type="file" accept="image/*" onChange={handleAvatarChange} />
-            {avatar ? <img src={avatar} alt="头像" /> : <span>听</span>}
+            {avatar ? <img src={avatar} alt="头像" loading="lazy" decoding="async" /> : <span>听</span>}
             <em>{isSavingAvatar ? '保存中' : '更换'}</em>
           </label>
           <div>
@@ -2714,6 +2995,26 @@ function MeView({
                 </div>
               ))}
             </dl>
+            <div className="audio-event-log">
+              <strong>最近 audio 事件</strong>
+              {audioEventLogs.length ? (
+                <ol>
+                  {audioEventLogs.map((item, index) => (
+                    <li key={`${item.time}-${item.event}-${index}`}>
+                      <b>{item.time}</b>
+                      <span>{item.event}</span>
+                      <small>
+                        t={item.currentTime}/{item.duration} paused={String(item.paused)} ready={item.readyState} network={item.networkState}
+                      </small>
+                      {item.error ? <em>{item.error}</em> : null}
+                      {item.currentSrc ? <code>{item.currentSrc}</code> : null}
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <p>暂无 audio 事件，播放一次后这里会记录最近 30 条。</p>
+              )}
+            </div>
           </div>
         ) : null}
       </div>
