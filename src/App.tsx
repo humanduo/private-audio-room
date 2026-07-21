@@ -18,13 +18,9 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   addAlbumToFavoriteFolder,
-  analyzeAlbumMetadata,
-  analyzeLibraryMetadata,
   approveAiPendingMetadata,
   apiUrl,
   createFavoriteFolder,
-  estimateLibraryMetadata,
-  createCategory,
   exportMetadataTemplate,
   fetchAlbumRecommendations,
   fetchAiPendingMetadata,
@@ -62,9 +58,6 @@ import type {
   Episode,
   FavoriteFolder,
   MediaKind,
-  MetadataAnalyzeEstimate,
-  MetadataAnalyzeJob,
-  MetadataAnalyzeMode,
   MetadataImportResult,
   MetadataTemplateItem,
   NasConfig,
@@ -512,7 +505,6 @@ export function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [playerAlbum, setPlayerAlbum] = useState<Album | null>(null);
   const [playerEpisode, setPlayerEpisode] = useState<Episode | null>(null);
-  const [metadataAnalyzeJob, setMetadataAnalyzeJob] = useState<MetadataAnalyzeJob | null>(null);
   const [favoriteCvs, setFavoriteCvs] = useState<string[]>(() => {
     try {
       const parsed = JSON.parse(localStorage.getItem(favoriteCvStorageKey) || '[]');
@@ -1363,12 +1355,6 @@ export function App() {
     reader.readAsDataURL(file);
   }
 
-  async function handleAddCategory(name: string) {
-    const nextCategories = await createCategory(name);
-    setCategories(nextCategories);
-    setNotice('分类已添加');
-  }
-
   async function handleCreateFavoriteFolder(name: string) {
     const nextFolders = await createFavoriteFolder(name);
     setFavoriteFolders(nextFolders);
@@ -1428,34 +1414,6 @@ export function App() {
     setSelectedAlbum((current) => (current?.id === albumId ? updatedAlbum : current));
     setPlayerAlbum((current) => (current?.id === albumId ? updatedAlbum : current));
     setNotice('资料已保存');
-  }
-
-  async function handleAnalyzeMetadata(albumId: string) {
-    try {
-      setNotice('DeepSeek 正在整理资料...');
-      const result = await analyzeAlbumMetadata(albumId);
-      setAlbums((current) => current.map((album) => (album.id === albumId ? result.album : album)));
-      setSelectedAlbum((current) => (current?.id === albumId ? result.album : current));
-      setPlayerAlbum((current) => (current?.id === albumId ? result.album : current));
-      setNotice(result.metadata.needsReview ? 'DeepSeek 已整理，已加入待确认' : 'DeepSeek 已整理');
-      return result;
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'DeepSeek 资料整理失败');
-      throw error;
-    }
-  }
-
-  async function handleAnalyzeLibraryMetadata(mode: MetadataAnalyzeMode = 'all') {
-    try {
-      setNotice('DeepSeek 正在整理全部广播剧，这会需要一点时间...');
-      const result = await analyzeLibraryMetadata(mode, setMetadataAnalyzeJob);
-      setAlbums(result.albums.filter((album) => album.kind === activeKind));
-      setSelectedAlbum((current) => (current ? result.albums.find((album) => album.id === current.id) || current : current));
-      setPlayerAlbum((current) => (current ? result.albums.find((album) => album.id === current.id) || current : current));
-      setNotice(`全库整理完成：成功 ${result.job.updated} 部，跳过 ${result.job.skipped || 0} 部，失败 ${result.job.failed} 部`);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'DeepSeek 全库整理失败');
-    }
   }
 
   return (
@@ -1548,13 +1506,10 @@ export function App() {
               albums={albums}
               categories={categories}
               favoriteFolders={favoriteFolders}
-              metadataAnalyzeJob={metadataAnalyzeJob}
               nasRoot={nasRoot}
               setNasRoot={setNasRoot}
               onSaveNas={handleSaveNas}
               onScanNas={handleScan}
-              onAddCategory={handleAddCategory}
-              onAnalyzeLibrary={handleAnalyzeLibraryMetadata}
               onAlbumUpdated={patchAlbumInState}
               onMetadataImported={() => load()}
               onOpen={setSelectedAlbum}
@@ -1581,7 +1536,6 @@ export function App() {
             onCoverUpload={handleCoverUpload}
             onGenerateCover={handleGenerateCover}
             onMetadataChange={handleMetadataChange}
-            onAnalyzeMetadata={handleAnalyzeMetadata}
             favoriteFolders={favoriteFolders}
             onCreateFavoriteFolder={handleCreateFavoriteFolder}
             onAddFavorite={handleAddFavorite}
@@ -1968,11 +1922,12 @@ function CvWall({
         {visibleProfiles.map((profile) => {
           const isFavorite = favoriteCvs.includes(profile.name);
           const avatar = cvAvatars[profile.name] || profile.cover;
+          const hasAvatar = isImageCover(avatar);
           return (
             <article key={profile.name} className={isFavorite ? 'cv-card favorite' : 'cv-card'}>
               <button className="cv-avatar-button" onClick={() => void onOpenCv(profile.name)} aria-label={`查看 ${profile.name} 的广播剧`}>
-                <span className="cv-avatar" style={{ background: coverBackground(avatar) }}>
-                  {isImageCover(avatar) ? null : profile.initial}
+                <span className={hasAvatar ? 'cv-avatar' : 'cv-avatar placeholder'} style={hasAvatar ? { background: coverBackground(avatar) } : undefined}>
+                  {hasAvatar ? null : profile.initial}
                 </span>
               </button>
               <label className="cv-avatar-upload" aria-label={`更换 ${profile.name} 的头像`}>
@@ -1996,7 +1951,7 @@ function CvWall({
           );
         })}
       </div>
-      {!visibleProfiles.length ? <div className="empty-state compact">还没有找到 CV。先用 DeepSeek 整理或手动补配音演员。</div> : null}
+      {!visibleProfiles.length ? <div className="empty-state compact">还没有找到 CV。可以先导入资料或手动补配音演员。</div> : null}
     </section>
   );
 }
@@ -2576,13 +2531,10 @@ function MeView({
   albums,
   categories,
   favoriteFolders,
-  metadataAnalyzeJob,
   nasRoot,
   setNasRoot,
   onSaveNas,
   onScanNas,
-  onAddCategory,
-  onAnalyzeLibrary,
   onAlbumUpdated,
   onMetadataImported,
   onOpen,
@@ -2601,13 +2553,10 @@ function MeView({
   albums: Album[];
   categories: Category[];
   favoriteFolders: FavoriteFolder[];
-  metadataAnalyzeJob: MetadataAnalyzeJob | null;
   nasRoot: string;
   setNasRoot: (value: string) => void;
   onSaveNas: () => Promise<void>;
   onScanNas: () => Promise<void>;
-  onAddCategory: (name: string) => Promise<void>;
-  onAnalyzeLibrary: (mode?: MetadataAnalyzeMode) => Promise<void>;
   onAlbumUpdated: (album: Album) => void;
   onMetadataImported: () => Promise<void>;
   onOpen: (album: Album) => void;
@@ -2622,15 +2571,10 @@ function MeView({
   onRefreshMediaDiagnostics: () => void;
   onTestMediaSessionRegistration: () => void;
 }) {
-  const [categoryName, setCategoryName] = useState('');
   const [avatar, setAvatar] = useState('');
   const [isSavingAvatar, setIsSavingAvatar] = useState(false);
   const [favoriteQuery, setFavoriteQuery] = useState('');
   const [activeFavoriteFolderId, setActiveFavoriteFolderId] = useState('all');
-  const [isAnalyzeDialogOpen, setIsAnalyzeDialogOpen] = useState(false);
-  const [selectedAnalyzeMode, setSelectedAnalyzeMode] = useState<MetadataAnalyzeMode>('missing-only');
-  const [metadataEstimate, setMetadataEstimate] = useState<MetadataAnalyzeEstimate | null>(null);
-  const [isEstimatingMetadata, setIsEstimatingMetadata] = useState(false);
   const [aiPendingItems, setAiPendingItems] = useState<AiPendingMetadata[]>([]);
   const [isLoadingAiPending, setIsLoadingAiPending] = useState(false);
   const [busyAiPendingId, setBusyAiPendingId] = useState('');
@@ -2649,15 +2593,6 @@ function MeView({
   const [sleepClock, setSleepClock] = useState('24:00');
   const [apiBaseInput, setApiBaseInput] = useState(() => getApiBaseUrl());
   const [apiBaseStatus, setApiBaseStatus] = useState('');
-  const isAnalyzingLibrary = metadataAnalyzeJob?.status === 'queued' || metadataAnalyzeJob?.status === 'running';
-  const metadataAnalyzePercent = metadataAnalyzeJob?.total
-    ? Math.round((metadataAnalyzeJob.processed / metadataAnalyzeJob.total) * 100)
-    : 0;
-  const analyzeModeOptions: Array<{ mode: MetadataAnalyzeMode; title: string; note: string }> = [
-    { mode: 'missing-only', title: '只整理缺资料', note: '省钱，优先补简介、作者、配音' },
-    { mode: 'failed-only', title: '重试失败', note: '只重新处理上次失败的广播剧' },
-    { mode: 'all', title: '重新整理全部', note: '适合第一次建库或重做标签' }
-  ];
 
   useEffect(() => {
     fetchProfile()
@@ -2678,14 +2613,6 @@ function MeView({
     }
   }
 
-  async function submitCategory(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const name = categoryName.trim();
-    if (!name) return;
-    await onAddCategory(name);
-    setCategoryName('');
-  }
-
   async function handleAvatarChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -2704,33 +2631,6 @@ function MeView({
       }
     };
     reader.readAsDataURL(file);
-  }
-
-  async function openAnalyzeDialog(mode: MetadataAnalyzeMode = selectedAnalyzeMode) {
-    setSelectedAnalyzeMode(mode);
-    setIsAnalyzeDialogOpen(true);
-    setIsEstimatingMetadata(true);
-    try {
-      setMetadataEstimate(await estimateLibraryMetadata(mode));
-    } finally {
-      setIsEstimatingMetadata(false);
-    }
-  }
-
-  async function selectAnalyzeMode(mode: MetadataAnalyzeMode) {
-    setSelectedAnalyzeMode(mode);
-    setIsEstimatingMetadata(true);
-    try {
-      setMetadataEstimate(await estimateLibraryMetadata(mode));
-    } finally {
-      setIsEstimatingMetadata(false);
-    }
-  }
-
-  async function confirmAnalyzeLibrary() {
-    setIsAnalyzeDialogOpen(false);
-    await onAnalyzeLibrary(selectedAnalyzeMode);
-    void loadAiPendingItems();
   }
 
   async function handleApprovePending(item: AiPendingMetadata) {
@@ -2898,16 +2798,6 @@ function MeView({
     window.setTimeout(() => window.location.reload(), 350);
   }
 
-  const myTools: Array<{ icon: SketchIconName; label: string; note: string }> = [
-    { icon: 'timer', label: '定时关闭', note: '睡前播放' },
-    { icon: 'chase', label: '我的追剧', note: '继续听' },
-    { icon: 'category', label: '分类设置', note: '古代/现代' },
-    { icon: 'history', label: '播放历史', note: '断点记录' },
-    { icon: 'cover', label: '封面管理', note: '手动美化' },
-    { icon: 'cache', label: '本地缓存', note: '离线听' },
-    { icon: 'backup', label: '数据备份', note: '保护记录' },
-    { icon: 'settings', label: '应用设置', note: '偏好设置' }
-  ];
   const favoriteAlbumIds =
     activeFavoriteFolderId === 'all'
       ? [...new Set(favoriteFolders.flatMap((folder) => folder.albumIds))]
@@ -2978,187 +2868,291 @@ function MeView({
         </div>
       </div>
 
-      <div className="settings-card me-nas-card">
-        <label htmlFor="me-nas-root">NAS 音频路径</label>
-        <input id="me-nas-root" value={nasRoot} onChange={(event) => setNasRoot(event.target.value)} placeholder="/docker/private-audio-room/Audio" />
-        <div className="button-row">
-          <button onClick={() => void onSaveNas()}>保存路径</button>
-          <button className="filled" onClick={() => void onScanNas()}>
-            扫描音频
-          </button>
-        </div>
-        <p>{nas?.connected ? `已连接：${nas.root}` : '把广播剧目录挂载到容器后，在这里保存路径并扫描。'}</p>
-      </div>
-
-      <div className="settings-card app-server-card">
-        <label htmlFor="app-api-base">后端服务器地址</label>
-        <input
-          id="app-api-base"
-          value={apiBaseInput}
-          onChange={(event) => setApiBaseInput(event.target.value)}
-          placeholder="http://你的NAS局域网IP:8787"
-        />
-        <div className="button-row">
-          <button className="filled" onClick={handleSaveApiBaseUrl}>
-            保存服务器地址
-          </button>
-          <button onClick={handleClearApiBaseUrl}>清空</button>
-        </div>
-        <p>{apiBaseStatus || (getApiBaseUrl() ? `当前：${getApiBaseUrl()}` : '网页端可以留空；Android App 建议填写 NAS 后端地址。')}</p>
-      </div>
-
-      <div className="settings-card media-diagnostics-card">
-        <button className="media-diagnostics-toggle" onClick={() => setIsMediaDiagnosticsOpen((value) => !value)}>
-          <span>
-            <strong>移动端媒体诊断</strong>
-            <small>检查 Media Session、audio 状态和系统媒体注册</small>
-          </span>
-          <ChevronDown size={18} className={isMediaDiagnosticsOpen ? 'open' : ''} />
-        </button>
-        {isMediaDiagnosticsOpen ? (
-          <div className="media-diagnostics-body">
-            <div className="button-row">
-              <button onClick={onRefreshMediaDiagnostics}>刷新诊断信息</button>
-              <button className="filled" onClick={onTestMediaSessionRegistration}>
-                测试系统媒体注册
-              </button>
-            </div>
-            <dl className="media-diagnostics-grid">
-              {mediaDiagnosticRows.map(([key, label]) => (
-                <div key={key}>
-                  <dt>{label}</dt>
-                  <dd>{mediaDiagnostics?.[key] || 'unavailable'}</dd>
-                </div>
-              ))}
-            </dl>
-            <div className="audio-event-log">
-              <strong>最近 audio 事件</strong>
-              {audioEventLogs.length ? (
-                <ol>
-                  {audioEventLogs.map((item, index) => (
-                    <li key={`${item.time}-${item.event}-${index}`}>
-                      <b>{item.time}</b>
-                      <span>{item.event}</span>
-                      <small>
-                        t={item.currentTime}/{item.duration} paused={String(item.paused)} ready={item.readyState} network={item.networkState}
-                      </small>
-                      {item.error ? <em>{item.error}</em> : null}
-                      {item.currentSrc ? <code>{item.currentSrc}</code> : null}
-                    </li>
-                  ))}
-                </ol>
-              ) : (
-                <p>暂无 audio 事件，播放一次后这里会记录最近 30 条。</p>
-              )}
-            </div>
-          </div>
-        ) : null}
-      </div>
-
-      <div className="settings-card metadata-transfer-card">
-        <div className="metadata-transfer-head">
+      <div className="settings-card management-center-card">
+        <div className="management-head">
           <div>
-            <label>资料导入 / 导出</label>
-            <strong>用 JSON 管理广播剧资料</strong>
+            <label>管理中心</label>
+            <strong>广播剧后台管理</strong>
           </div>
-          <Download size={18} />
+          <SlidersHorizontal size={19} />
         </div>
-        <p>导出模板后可补充 tags、CV、简介、分类等资料；导入前会自动备份 state.json，只更新资料字段。</p>
-        <div className="button-row">
-          <button onClick={() => void handleExportMetadataTemplate()} disabled={isExportingMetadata}>
-            {isExportingMetadata ? '导出中' : '导出模板 JSON'}
-          </button>
-          <label className={isImportingMetadata ? 'metadata-import-button disabled' : 'metadata-import-button'}>
-            {isImportingMetadata ? '导入中' : '上传 metadata JSON'}
-            <input type="file" accept=".json,application/json" disabled={isImportingMetadata} onChange={handleImportMetadataFile} />
-          </label>
-        </div>
-        <div className="cover-import-box">
-          <div>
-            <strong>批量导入封面</strong>
-            <span>{coverImportFile ? coverImportFile.name : '选择包含 manifest.json 的 .zip 封面包'}</span>
-          </div>
-          <div className="button-row">
-            <label className={isImportingCovers ? 'metadata-import-button disabled' : 'metadata-import-button'}>
-              选择 ZIP
+
+        <details className="management-section">
+          <summary>
+            <span>
+              <strong>连接配置</strong>
+              <small>NAS 路径、后端服务器地址</small>
+            </span>
+            <ChevronDown size={18} />
+          </summary>
+          <div className="management-section-body">
+            <div className="management-field">
+              <label htmlFor="me-nas-root">NAS 音频路径</label>
+              <input id="me-nas-root" value={nasRoot} onChange={(event) => setNasRoot(event.target.value)} placeholder="/docker/private-audio-room/Audio" />
+              <div className="button-row">
+                <button onClick={() => void onSaveNas()}>保存路径</button>
+                <button className="filled" onClick={() => void onScanNas()}>
+                  扫描音频
+                </button>
+              </div>
+              <p>{nas?.connected ? `已连接：${nas.root}` : '把广播剧目录挂载到容器后，在这里保存路径并扫描。'}</p>
+            </div>
+
+            <div className="management-field">
+              <label htmlFor="app-api-base">后端服务器地址</label>
               <input
-                type="file"
-                accept=".zip,application/zip,application/x-zip-compressed"
-                disabled={isImportingCovers}
-                onChange={handleCoverImportFile}
+                id="app-api-base"
+                value={apiBaseInput}
+                onChange={(event) => setApiBaseInput(event.target.value)}
+                placeholder="http://你的NAS局域网IP:8787"
               />
-            </label>
-            <button className="filled" disabled={!coverImportFile || isImportingCovers} onClick={() => void handleImportCoversZip()}>
-              {isImportingCovers ? '导入中' : '上传并导入封面'}
-            </button>
+              <div className="button-row">
+                <button className="filled" onClick={handleSaveApiBaseUrl}>
+                  保存服务器地址
+                </button>
+                <button onClick={handleClearApiBaseUrl}>清空</button>
+              </div>
+              <p>{apiBaseStatus || (getApiBaseUrl() ? `当前：${getApiBaseUrl()}` : '网页端可以留空；Android App 建议填写 NAS 后端地址。')}</p>
+            </div>
           </div>
-        </div>
-        <div className="cover-import-box">
-          <div>
-            <strong>CV 头像清单</strong>
-            <span>从当前资料里的 CV / 配音演员自动统计待补头像清单，按出现次数排序，方便优先补高频头像。</span>
-          </div>
-          <div className="button-row">
-            <button className="filled" disabled={isExportingCvTodo} onClick={() => void handleExportCvAvatarTodo()}>
-              {isExportingCvTodo ? '导出中' : '导出 CV 头像清单'}
-            </button>
-          </div>
-        </div>
-        {metadataTransferError ? <p className="metadata-transfer-error">{metadataTransferError}</p> : null}
-        {metadataImportResult ? (
-          <div className="metadata-import-result">
-            <div>
-              <span>总数</span>
-              <strong>{metadataImportResult.total}</strong>
+        </details>
+
+        <details className="management-section">
+          <summary>
+            <span>
+              <strong>广播剧资料管理</strong>
+              <small>JSON、封面、CV 清单、AI 待确认</small>
+            </span>
+            <ChevronDown size={18} />
+          </summary>
+          <div className="management-section-body metadata-transfer-card">
+            <div className="metadata-transfer-head">
+              <div>
+                <label>资料导入 / 导出</label>
+                <strong>用 JSON 管理广播剧资料</strong>
+              </div>
+              <Download size={18} />
             </div>
-            <div>
-              <span>更新</span>
-              <strong>{metadataImportResult.updated}</strong>
+            <p>导出模板后可补充 tags、CV、简介、分类等资料；导入前会自动备份 state.json，只更新资料字段。</p>
+            <div className="button-row">
+              <button onClick={() => void handleExportMetadataTemplate()} disabled={isExportingMetadata}>
+                {isExportingMetadata ? '导出中' : '导出模板 JSON'}
+              </button>
+              <label className={isImportingMetadata ? 'metadata-import-button disabled' : 'metadata-import-button'}>
+                {isImportingMetadata ? '导入中' : '上传 metadata JSON'}
+                <input type="file" accept=".json,application/json" disabled={isImportingMetadata} onChange={handleImportMetadataFile} />
+              </label>
             </div>
-            <div>
-              <span>跳过</span>
-              <strong>{metadataImportResult.skipped}</strong>
+            <div className="cover-import-box">
+              <div>
+                <strong>批量导入封面</strong>
+                <span>{coverImportFile ? coverImportFile.name : '选择包含 manifest.json 的 .zip 封面包'}</span>
+              </div>
+              <div className="button-row">
+                <label className={isImportingCovers ? 'metadata-import-button disabled' : 'metadata-import-button'}>
+                  选择 ZIP
+                  <input
+                    type="file"
+                    accept=".zip,application/zip,application/x-zip-compressed"
+                    disabled={isImportingCovers}
+                    onChange={handleCoverImportFile}
+                  />
+                </label>
+                <button className="filled" disabled={!coverImportFile || isImportingCovers} onClick={() => void handleImportCoversZip()}>
+                  {isImportingCovers ? '导入中' : '上传并导入封面'}
+                </button>
+              </div>
             </div>
-            <div>
-              <span>未匹配</span>
-              <strong>{metadataImportResult.notMatched.length}</strong>
+            <div className="cover-import-box">
+              <div>
+                <strong>CV 头像清单</strong>
+                <span>从当前资料里的 CV / 配音演员自动统计待补头像清单，按出现次数排序，方便优先补高频头像。</span>
+              </div>
+              <div className="button-row">
+                <button className="filled" disabled={isExportingCvTodo} onClick={() => void handleExportCvAvatarTodo()}>
+                  {isExportingCvTodo ? '导出中' : '导出 CV 头像清单'}
+                </button>
+              </div>
             </div>
-            <small>{metadataImportResult.backupFile ? `已备份：${metadataImportResult.backupFile.split('/').pop()}` : '已尝试备份 state.json'}</small>
-            {metadataImportResult.notMatched.length ? <em>未匹配：{metadataImportResult.notMatched.slice(0, 4).join('、')}</em> : null}
-            {metadataImportResult.errors.length ? <em>错误：{metadataImportResult.errors.slice(0, 3).join('；')}</em> : null}
-          </div>
-        ) : null}
-        {coverImportResult ? (
-          <div className="metadata-import-result cover-import-result">
-            <div>
-              <span>总数</span>
-              <strong>{coverImportResult.total}</strong>
+            <div className="ai-review-inline">
+              <div className="ai-review-inline-head">
+                <div>
+                  <strong>AI 待确认</strong>
+                  <span>{isLoadingAiPending ? '读取中' : `${aiPendingItems.length} 条`}</span>
+                </div>
+                <button onClick={() => void loadAiPendingItems()} disabled={isLoadingAiPending}>
+                  刷新
+                </button>
+              </div>
+              {aiPendingError ? <p className="ai-review-error">{aiPendingError}</p> : null}
+              <div className="ai-pending-list">
+                {aiPendingItems.map((item) => {
+                  const album = albums.find((current) => current.id === item.albumId);
+                  const metadata = item.metadata;
+                  const confidence = Number(metadata.confidence || 0);
+                  const chips = [
+                    metadata.author,
+                    ...(metadata.cast || []),
+                    metadata.relationship,
+                    metadata.audience,
+                    metadata.finishStatus,
+                    ...(metadata.genres || [])
+                  ]
+                    .filter(Boolean)
+                    .slice(0, 8);
+                  return (
+                    <article key={item.id} className="ai-pending-card">
+                      <div className="ai-pending-main">
+                        <span className="mini-cover" style={{ background: coverBackground(album?.cover) }} />
+                        <div>
+                          <strong>{item.title}</strong>
+                          <small>{item.reason || '需要确认后写入'}</small>
+                        </div>
+                        <em>{Math.round(confidence * 100)}%</em>
+                      </div>
+                      {metadata.summary || metadata.description ? <p>{metadata.summary || metadata.description}</p> : <p>AI 没有确认到可靠简介。</p>}
+                      <div className="ai-pending-chips">
+                        {chips.length ? chips.map((chip) => <i key={String(chip)}>{String(chip)}</i>) : <i>缺少可确认标签</i>}
+                      </div>
+                      <div className="ai-pending-sources">
+                        {(item.sources || []).slice(0, 3).map((source, index) => (
+                          <a key={source} href={source} target="_blank" rel="noreferrer">
+                            {sourceHost(source) || `来源 ${index + 1}`}
+                          </a>
+                        ))}
+                        {!item.sources?.length ? <span>没有来源，不会自动写入</span> : null}
+                      </div>
+                      <div className="ai-pending-actions">
+                        <button disabled={busyAiPendingId === item.id} onClick={() => void handleApprovePending(item)}>
+                          批准写入
+                        </button>
+                        <button disabled={busyAiPendingId === item.id} onClick={() => void handleResearchPending(item)}>
+                          重新搜索
+                        </button>
+                        <button disabled={busyAiPendingId === item.id} onClick={() => void handleRejectPending(item)}>
+                          拒绝
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
+                {!aiPendingItems.length ? <p className="ai-review-empty">暂时没有需要确认的 AI 资料。</p> : null}
+              </div>
             </div>
-            <div>
-              <span>导入</span>
-              <strong>{coverImportResult.imported}</strong>
-            </div>
-            <div>
-              <span>跳过</span>
-              <strong>{coverImportResult.skipped}</strong>
-            </div>
-            <div>
-              <span>未匹配</span>
-              <strong>{coverImportResult.notMatched.length}</strong>
-            </div>
-            <small>{coverImportResult.backupFile ? `已备份：${coverImportResult.backupFile.split('/').pop()}` : '已尝试备份 state.json'}</small>
-            {coverImportResult.notMatched.length ? <em>未匹配：{coverImportResult.notMatched.slice(0, 4).join('、')}</em> : null}
-            {coverImportResult.errors.length ? (
-              <em>
-                错误：
-                {coverImportResult.errors
-                  .slice(0, 3)
-                  .map((error) => `${error.originalTitle || error.fileName}：${error.message}`)
-                  .join('；')}
-              </em>
+            {metadataTransferError ? <p className="metadata-transfer-error">{metadataTransferError}</p> : null}
+            {metadataImportResult ? (
+              <div className="metadata-import-result">
+                <div>
+                  <span>总数</span>
+                  <strong>{metadataImportResult.total}</strong>
+                </div>
+                <div>
+                  <span>更新</span>
+                  <strong>{metadataImportResult.updated}</strong>
+                </div>
+                <div>
+                  <span>跳过</span>
+                  <strong>{metadataImportResult.skipped}</strong>
+                </div>
+                <div>
+                  <span>未匹配</span>
+                  <strong>{metadataImportResult.notMatched.length}</strong>
+                </div>
+                <small>{metadataImportResult.backupFile ? `已备份：${metadataImportResult.backupFile.split('/').pop()}` : '已尝试备份 state.json'}</small>
+                {metadataImportResult.notMatched.length ? <em>未匹配：{metadataImportResult.notMatched.slice(0, 4).join('、')}</em> : null}
+                {metadataImportResult.errors.length ? <em>错误：{metadataImportResult.errors.slice(0, 3).join('；')}</em> : null}
+              </div>
+            ) : null}
+            {coverImportResult ? (
+              <div className="metadata-import-result cover-import-result">
+                <div>
+                  <span>总数</span>
+                  <strong>{coverImportResult.total}</strong>
+                </div>
+                <div>
+                  <span>导入</span>
+                  <strong>{coverImportResult.imported}</strong>
+                </div>
+                <div>
+                  <span>跳过</span>
+                  <strong>{coverImportResult.skipped}</strong>
+                </div>
+                <div>
+                  <span>未匹配</span>
+                  <strong>{coverImportResult.notMatched.length}</strong>
+                </div>
+                <small>{coverImportResult.backupFile ? `已备份：${coverImportResult.backupFile.split('/').pop()}` : '已尝试备份 state.json'}</small>
+                {coverImportResult.notMatched.length ? <em>未匹配：{coverImportResult.notMatched.slice(0, 4).join('、')}</em> : null}
+                {coverImportResult.errors.length ? (
+                  <em>
+                    错误：
+                    {coverImportResult.errors
+                      .slice(0, 3)
+                      .map((error) => `${error.originalTitle || error.fileName}：${error.message}`)
+                      .join('；')}
+                  </em>
+                ) : null}
+              </div>
             ) : null}
           </div>
-        ) : null}
+        </details>
+
+        <details className="management-section">
+          <summary>
+            <span>
+              <strong>调试工具</strong>
+              <small>移动端媒体诊断</small>
+            </span>
+            <ChevronDown size={18} />
+          </summary>
+          <div className="management-section-body media-diagnostics-body">
+            <button className="media-diagnostics-toggle compact" onClick={() => setIsMediaDiagnosticsOpen((value) => !value)}>
+              <span>
+                <strong>移动端媒体诊断</strong>
+                <small>检查 Media Session、audio 状态和系统媒体注册</small>
+              </span>
+              <ChevronDown size={18} className={isMediaDiagnosticsOpen ? 'open' : ''} />
+            </button>
+            {isMediaDiagnosticsOpen ? (
+              <>
+                <div className="button-row">
+                  <button onClick={onRefreshMediaDiagnostics}>刷新诊断信息</button>
+                  <button className="filled" onClick={onTestMediaSessionRegistration}>
+                    测试系统媒体注册
+                  </button>
+                </div>
+                <dl className="media-diagnostics-grid">
+                  {mediaDiagnosticRows.map(([key, label]) => (
+                    <div key={key}>
+                      <dt>{label}</dt>
+                      <dd>{mediaDiagnostics?.[key] || 'unavailable'}</dd>
+                    </div>
+                  ))}
+                </dl>
+                <div className="audio-event-log">
+                  <strong>最近 audio 事件</strong>
+                  {audioEventLogs.length ? (
+                    <ol>
+                      {audioEventLogs.map((item, index) => (
+                        <li key={`${item.time}-${item.event}-${index}`}>
+                          <b>{item.time}</b>
+                          <span>{item.event}</span>
+                          <small>
+                            t={item.currentTime}/{item.duration} paused={String(item.paused)} ready={item.readyState} network={item.networkState}
+                          </small>
+                          {item.error ? <em>{item.error}</em> : null}
+                          {item.currentSrc ? <code>{item.currentSrc}</code> : null}
+                        </li>
+                      ))}
+                    </ol>
+                  ) : (
+                    <p>暂无 audio 事件，播放一次后这里会记录最近 30 条。</p>
+                  )}
+                </div>
+              </>
+            ) : null}
+          </div>
+        </details>
       </div>
 
       <section className="favorites-panel">
@@ -3195,19 +3189,12 @@ function MeView({
         </div>
       </section>
 
-      <div className="me-tool-grid">
-        <button disabled={isAnalyzingLibrary} onClick={() => void openAnalyzeDialog()}>
-          <SketchIcon name="settings" decorated />
-          <strong>一键编辑</strong>
-          <span>{isAnalyzingLibrary ? '整理中' : 'DeepSeek 整理'}</span>
+      <div className="me-tool-grid compact">
+        <button onClick={() => setIsSleepTimerOpen(true)}>
+          <SketchIcon name="timer" decorated />
+          <strong>定时关闭</strong>
+          <span>{sleepTimerTargetAt ? `剩余 ${formatRemainingTime(sleepTimerRemainingMs)}` : '睡前播放'}</span>
         </button>
-        {myTools.map((tool) => (
-          <button key={tool.label} onClick={tool.icon === 'timer' ? () => setIsSleepTimerOpen(true) : undefined}>
-            <SketchIcon name={tool.icon} decorated />
-            <strong>{tool.label}</strong>
-            <span>{tool.icon === 'timer' && sleepTimerTargetAt ? `剩余 ${formatRemainingTime(sleepTimerRemainingMs)}` : tool.note}</span>
-          </button>
-        ))}
       </div>
 
       {isSleepTimerOpen ? (
@@ -3264,177 +3251,6 @@ function MeView({
         </div>
       ) : null}
 
-      {metadataAnalyzeJob ? (
-        <section className="metadata-progress-card">
-          <div className="metadata-progress-head">
-            <strong>
-              {metadataAnalyzeJob.status === 'completed'
-                ? 'DeepSeek 整理完成'
-                : metadataAnalyzeJob.status === 'failed'
-                  ? 'DeepSeek 整理失败'
-                  : 'DeepSeek 正在整理'}
-            </strong>
-            <span>{metadataAnalyzePercent}%</span>
-          </div>
-          <div className="metadata-progress-bar">
-            <i style={{ width: `${metadataAnalyzePercent}%` }} />
-          </div>
-          <p>
-            {metadataAnalyzeJob.currentAlbumTitle
-              ? `正在整理：${metadataAnalyzeJob.currentAlbumTitle}`
-              : metadataAnalyzeJob.status === 'completed'
-                ? '本次全库整理已经结束。'
-                : metadataAnalyzeJob.error || '正在准备任务...'}
-          </p>
-          <div className="metadata-progress-stats">
-            <span>总数 {metadataAnalyzeJob.total}</span>
-            <span>已完成 {metadataAnalyzeJob.processed}</span>
-            <span>成功 {metadataAnalyzeJob.updated}</span>
-            <span>跳过 {metadataAnalyzeJob.skipped || 0}</span>
-            <span>失败 {metadataAnalyzeJob.failed}</span>
-          </div>
-          {metadataAnalyzeJob.status === 'completed' && metadataAnalyzeJob.failed > 0 ? (
-            <button className="metadata-retry-button" onClick={() => void openAnalyzeDialog('failed-only')}>
-              重试失败项
-            </button>
-          ) : null}
-          {metadataAnalyzeJob.results.length ? (
-            <div className="metadata-result-list">
-              {metadataAnalyzeJob.results.slice(-8).reverse().map((result) => (
-                <button
-                  key={`${metadataAnalyzeJob.id}-${result.id}`}
-                  onClick={() => {
-                    const album = albums.find((item) => item.id === result.id);
-                    if (album) onOpen(album);
-                  }}
-                >
-                  <span className={result.ok ? (result.skipped ? 'review' : result.needsReview || result.aiMetaStatus === 'suggested' ? 'review' : 'ok') : 'fail'}>
-                    {result.ok ? (result.skipped ? '跳过' : result.needsReview || result.aiMetaStatus === 'suggested' ? '待确认' : '成功') : '失败'}
-                  </span>
-                  <strong>{result.title}</strong>
-                  <small>{result.error || (result.skipped ? '手动资料已保留' : result.needsReview || result.aiMetaStatus === 'suggested' ? '需要你检查资料' : '已保存')}</small>
-                </button>
-              ))}
-            </div>
-          ) : null}
-        </section>
-      ) : null}
-
-      {isAnalyzeDialogOpen ? (
-        <div className="metadata-dialog" role="dialog" aria-label="DeepSeek 整理确认">
-          <div className="metadata-dialog-card">
-            <div className="metadata-dialog-head">
-              <strong>DeepSeek 整理</strong>
-              <button onClick={() => setIsAnalyzeDialogOpen(false)}>关闭</button>
-            </div>
-            <div className="metadata-mode-list">
-              {analyzeModeOptions.map((option) => (
-                <button
-                  key={option.mode}
-                  className={selectedAnalyzeMode === option.mode ? 'active' : ''}
-                  onClick={() => void selectAnalyzeMode(option.mode)}
-                >
-                  <strong>{option.title}</strong>
-                  <span>{option.note}</span>
-                </button>
-              ))}
-            </div>
-            <div className="metadata-estimate-box">
-              <span>预计整理</span>
-              <strong>{isEstimatingMetadata ? '计算中...' : `${metadataEstimate?.total ?? 0} 部`}</strong>
-              {metadataEstimate && metadataEstimate.totalBeforeLimit > metadataEstimate.total ? (
-                <small>本次最多处理 {metadataEstimate.limit} 部，剩余可下次继续。</small>
-              ) : (
-                <small>开始后会显示进度、结果和失败项。</small>
-              )}
-            </div>
-            <button className="metadata-confirm-button" disabled={isEstimatingMetadata || !metadataEstimate?.total} onClick={() => void confirmAnalyzeLibrary()}>
-              确认开始
-            </button>
-          </div>
-        </div>
-      ) : null}
-
-      <section className="ai-review-panel">
-        <SectionHeader title="AI 待确认" subtitle={isLoadingAiPending ? '读取中' : `${aiPendingItems.length} 条`} />
-        <div className="ai-review-toolbar">
-          <button onClick={() => void loadAiPendingItems()} disabled={isLoadingAiPending}>
-            刷新
-          </button>
-        </div>
-        {aiPendingError ? <p className="ai-review-error">{aiPendingError}</p> : null}
-        <div className="ai-pending-list">
-          {aiPendingItems.map((item) => {
-            const album = albums.find((current) => current.id === item.albumId);
-            const metadata = item.metadata;
-            const confidence = Number(metadata.confidence || 0);
-            const chips = [
-              metadata.author,
-              ...(metadata.cast || []),
-              metadata.relationship,
-              metadata.audience,
-              metadata.finishStatus,
-              ...(metadata.genres || [])
-            ]
-              .filter(Boolean)
-              .slice(0, 8);
-            return (
-              <article key={item.id} className="ai-pending-card">
-                <div className="ai-pending-main">
-                  <span className="mini-cover" style={{ background: coverBackground(album?.cover) }} />
-                  <div>
-                    <strong>{item.title}</strong>
-                    <small>{item.reason || '需要确认后写入'}</small>
-                  </div>
-                  <em>{Math.round(confidence * 100)}%</em>
-                </div>
-                {metadata.summary || metadata.description ? <p>{metadata.summary || metadata.description}</p> : <p>AI 没有确认到可靠简介。</p>}
-                <div className="ai-pending-chips">
-                  {chips.length ? chips.map((chip) => <i key={String(chip)}>{String(chip)}</i>) : <i>缺少可确认标签</i>}
-                </div>
-                <div className="ai-pending-sources">
-                  {(item.sources || []).slice(0, 3).map((source, index) => (
-                    <a key={source} href={source} target="_blank" rel="noreferrer">
-                      {sourceHost(source) || `来源 ${index + 1}`}
-                    </a>
-                  ))}
-                  {!item.sources?.length ? <span>没有来源，不会自动写入</span> : null}
-                </div>
-                <div className="ai-pending-actions">
-                  <button disabled={busyAiPendingId === item.id} onClick={() => void handleApprovePending(item)}>
-                    批准写入
-                  </button>
-                  <button disabled={busyAiPendingId === item.id} onClick={() => void handleResearchPending(item)}>
-                    重新搜索
-                  </button>
-                  <button disabled={busyAiPendingId === item.id} onClick={() => void handleRejectPending(item)}>
-                    拒绝
-                  </button>
-                </div>
-              </article>
-            );
-          })}
-          {!aiPendingItems.length ? <p className="ai-review-empty">暂时没有需要确认的 AI 资料。</p> : null}
-        </div>
-      </section>
-
-      <div className="settings-card category-settings-card">
-        <label htmlFor="category-name">分类设置</label>
-        <form className="category-form" onSubmit={submitCategory}>
-          <input
-            id="category-name"
-            value={categoryName}
-            onChange={(event) => setCategoryName(event.target.value)}
-            placeholder="比如：古代、现代、修仙"
-          />
-          <button type="submit">添加</button>
-        </form>
-        <div className="category-preview">
-          {categories.map((category) => (
-            <span key={category.id}>{category.name}</span>
-          ))}
-        </div>
-      </div>
     </section>
   );
 }
@@ -3447,7 +3263,6 @@ function AlbumDrawer({
   onCoverUpload,
   onGenerateCover,
   onMetadataChange,
-  onAnalyzeMetadata,
   favoriteFolders,
   onCreateFavoriteFolder,
   onAddFavorite,
@@ -3469,7 +3284,6 @@ function AlbumDrawer({
   onCoverUpload: (albumId: string, file: File) => Promise<void>;
   onGenerateCover: (albumId: string) => Promise<void>;
   onMetadataChange: (albumId: string, metadata: Partial<Album>) => Promise<void>;
-  onAnalyzeMetadata: (albumId: string) => Promise<{ metadata: Partial<Album> & { confidence?: number; needsReview?: boolean }; album: Album }>;
   favoriteFolders: FavoriteFolder[];
   onCreateFavoriteFolder: (name: string) => Promise<FavoriteFolder[]>;
   onAddFavorite: (folderId: string, albumId: string) => Promise<void>;
@@ -3488,7 +3302,6 @@ function AlbumDrawer({
   const [isGeneratingCover, setIsGeneratingCover] = useState(false);
   const [isEditingMetadata, setIsEditingMetadata] = useState(false);
   const [isSavingMetadata, setIsSavingMetadata] = useState(false);
-  const [isAnalyzingMetadata, setIsAnalyzingMetadata] = useState(false);
   const [isFavoriteModalOpen, setIsFavoriteModalOpen] = useState(false);
   const [newFavoriteFolderName, setNewFavoriteFolderName] = useState('');
   const [isSavingFavorite, setIsSavingFavorite] = useState(false);
@@ -3583,27 +3396,6 @@ function AlbumDrawer({
     setMetadataDraft((current) => ({ ...current, [field]: value }));
   }
 
-  async function handleAnalyzeMetadata() {
-    setIsAnalyzingMetadata(true);
-    try {
-      const result = await onAnalyzeMetadata(album.id);
-      const updatedAlbum = result.album;
-      setMetadataDraft((current) => ({
-        author: updatedAlbum.author || current.author,
-        cast: updatedAlbum.cast?.length ? joinList(updatedAlbum.cast) : current.cast,
-        summary: updatedAlbum.summary || current.summary,
-        genres: updatedAlbum.genres?.length ? joinList(updatedAlbum.genres) : current.genres,
-        relationship: updatedAlbum.relationship || current.relationship,
-        audience: updatedAlbum.audience || current.audience,
-        finishStatus: updatedAlbum.finishStatus || current.finishStatus
-      }));
-      setIsEditingMetadata(false);
-      setActiveTab('summary');
-    } finally {
-      setIsAnalyzingMetadata(false);
-    }
-  }
-
   async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -3674,14 +3466,6 @@ function AlbumDrawer({
               <span>{isFavorited ? '已收藏' : '收藏'}</span>
             </button>
             <button>
-              <Download size={26} />
-              <span>缓存</span>
-            </button>
-            <button>
-              <Sparkles size={28} />
-              <span>追剧</span>
-            </button>
-            <button>
               <FolderOpen size={27} />
               <span>文件</span>
             </button>
@@ -3745,23 +3529,9 @@ function AlbumDrawer({
               <div className="summary-heading">
                 <span className="kind-badge">{kindLabel(album.kind)}</span>
                 <div>
-                  <button onClick={handleAnalyzeMetadata} disabled={isAnalyzingMetadata}>
-                    {isAnalyzingMetadata ? '整理中...' : 'AI 整理资料'}
-                  </button>
                   <button onClick={() => setIsEditingMetadata((value) => !value)}>{isEditingMetadata ? '收起编辑' : '编辑资料'}</button>
                 </div>
               </div>
-              {album.aiMetaStatus ? (
-                <small className="ai-meta-status">
-                  {album.aiMetaStatus === 'suggested'
-                    ? 'DeepSeek 已整理，建议你确认作者、配音和简介'
-                    : album.aiMetaStatus === 'failed'
-                      ? 'DeepSeek 上次整理失败'
-                      : album.aiMetaStatus === 'saved'
-                        ? 'AI 资料已保存'
-                        : '尚未 AI 整理'}
-                </small>
-              ) : null}
               <p>{albumSummary(album)}</p>
               <div className="metadata-chips">
                 {albumChips(album, 8).map((chip) => (

@@ -29,7 +29,14 @@ function safeLocalStorageValue(key: string) {
 }
 
 function normalizeApiBaseUrl(value: string) {
-  return value.trim().replace(/\/+$/, '');
+  const trimmed = value.trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  const isLocalOrIp =
+    /^localhost(?::\d+)?$/i.test(trimmed) ||
+    /^(\d{1,3}\.){3}\d{1,3}(?::\d+)?$/.test(trimmed) ||
+    /:\d+$/.test(trimmed);
+  return `${isLocalOrIp ? 'http' : 'https'}://${trimmed}`;
 }
 
 export function getApiBaseUrl() {
