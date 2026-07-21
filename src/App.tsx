@@ -21,6 +21,7 @@ import {
   analyzeAlbumMetadata,
   analyzeLibraryMetadata,
   approveAiPendingMetadata,
+  apiUrl,
   createFavoriteFolder,
   estimateLibraryMetadata,
   createCategory,
@@ -33,6 +34,7 @@ import {
   fetchNas,
   fetchProfile,
   generateAlbumCover,
+  getApiBaseUrl,
   downloadCvAvatarTodo,
   importAlbumCoversZip,
   importMetadataTemplate,
@@ -42,6 +44,7 @@ import {
   researchAiPendingMetadata,
   saveNas,
   scanNas,
+  setApiBaseUrl,
   updateEpisodeProgress,
   updateAlbumCover,
   updateCvAvatar,
@@ -194,19 +197,19 @@ function kindLabel(kind: MediaKind) {
 function coverBackground(cover?: string) {
   if (!cover) return 'linear-gradient(145deg, #fff6f2, #ffe4e5)';
   if (cover.startsWith('linear-gradient(') || cover.startsWith('radial-gradient(')) return cover;
-  return `url(${JSON.stringify(cover)})`;
+  return `url(${JSON.stringify(apiUrl(cover))})`;
 }
 
 function coverImageSrc(cover?: string) {
   if (!cover || cover.includes('gradient(')) return '';
-  return cover;
+  return apiUrl(cover);
 }
 
 function mediaArtworkUrl(cover?: string) {
   if (!cover || cover.includes('gradient(')) return '';
   if (cover.startsWith('data:image/')) return cover;
   try {
-    return new URL(cover, window.location.href).href;
+    return new URL(apiUrl(cover), window.location.href).href;
   } catch {
     return '';
   }
@@ -946,7 +949,7 @@ export function App() {
     const audio = audioRef.current;
     if (!audio) return;
 
-    const src = `/media/${encodeURIComponent(album.id)}/${encodeURIComponent(episode.id)}`;
+    const src = apiUrl(`/media/${encodeURIComponent(album.id)}/${encodeURIComponent(episode.id)}`);
     const absoluteSrc = new URL(src, window.location.href).href;
     if (audio.src !== absoluteSrc) {
       const snapshot = savedPlaybackSnapshot(album, episode);
@@ -2644,6 +2647,8 @@ function MeView({
   const [isMediaDiagnosticsOpen, setIsMediaDiagnosticsOpen] = useState(false);
   const [sleepMinutes, setSleepMinutes] = useState('30');
   const [sleepClock, setSleepClock] = useState('24:00');
+  const [apiBaseInput, setApiBaseInput] = useState(() => getApiBaseUrl());
+  const [apiBaseStatus, setApiBaseStatus] = useState('');
   const isAnalyzingLibrary = metadataAnalyzeJob?.status === 'queued' || metadataAnalyzeJob?.status === 'running';
   const metadataAnalyzePercent = metadataAnalyzeJob?.total
     ? Math.round((metadataAnalyzeJob.processed / metadataAnalyzeJob.total) * 100)
@@ -2879,6 +2884,20 @@ function MeView({
     onScheduleSleepTimerClock(sleepClock);
   }
 
+  function handleSaveApiBaseUrl() {
+    const saved = setApiBaseUrl(apiBaseInput);
+    setApiBaseInput(saved);
+    setApiBaseStatus(saved ? `已保存：${saved}，正在重新加载应用` : '已恢复为当前网页同源服务，正在重新加载应用');
+    window.setTimeout(() => window.location.reload(), 350);
+  }
+
+  function handleClearApiBaseUrl() {
+    setApiBaseUrl('');
+    setApiBaseInput('');
+    setApiBaseStatus('已恢复为当前网页同源服务，正在重新加载应用');
+    window.setTimeout(() => window.location.reload(), 350);
+  }
+
   const myTools: Array<{ icon: SketchIconName; label: string; note: string }> = [
     { icon: 'timer', label: '定时关闭', note: '睡前播放' },
     { icon: 'chase', label: '我的追剧', note: '继续听' },
@@ -2969,6 +2988,23 @@ function MeView({
           </button>
         </div>
         <p>{nas?.connected ? `已连接：${nas.root}` : '把广播剧目录挂载到容器后，在这里保存路径并扫描。'}</p>
+      </div>
+
+      <div className="settings-card app-server-card">
+        <label htmlFor="app-api-base">后端服务器地址</label>
+        <input
+          id="app-api-base"
+          value={apiBaseInput}
+          onChange={(event) => setApiBaseInput(event.target.value)}
+          placeholder="http://你的NAS局域网IP:8787"
+        />
+        <div className="button-row">
+          <button className="filled" onClick={handleSaveApiBaseUrl}>
+            保存服务器地址
+          </button>
+          <button onClick={handleClearApiBaseUrl}>清空</button>
+        </div>
+        <p>{apiBaseStatus || (getApiBaseUrl() ? `当前：${getApiBaseUrl()}` : '网页端可以留空；Android App 建议填写 NAS 后端地址。')}</p>
       </div>
 
       <div className="settings-card media-diagnostics-card">
